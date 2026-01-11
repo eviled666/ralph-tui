@@ -371,7 +371,7 @@ export class BeadsTrackerPlugin extends BaseTrackerPlugin {
     const labelsToFilter =
       filter?.labels && filter.labels.length > 0 ? filter.labels : this.labels;
     if (labelsToFilter.length > 0) {
-      args.push('--labels', labelsToFilter.join(','));
+      args.push('--label', labelsToFilter.join(','));
     }
 
     const { stdout, exitCode, stderr } = await execBd(args, this.workingDir);
