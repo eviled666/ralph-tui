@@ -1004,3 +1004,34 @@ Started: Sun 11 Jan 10:55:32 GMT 2026
   - External dependencies (not in task list) should be treated as potential blockers
   - Visual indicators (▶ vs ⊘) with color coding make status instantly recognizable
 ---
+
+## 2026-01-11 - ralph-tui-45r.40
+- What was implemented:
+  - FEAT: Select epic from TUI to start Ralph run
+  - Added getEpics() method to TrackerPlugin interface for fetching available epics
+  - Implemented getEpics() in BaseTrackerPlugin with default implementation
+  - Implemented getEpics() in BeadsTrackerPlugin using bd list --type epic
+  - Implemented getEpics() in JsonTrackerPlugin (returns synthetic epic from prd.json)
+  - Added setEpicId() and getEpicId() public methods to BeadsTrackerPlugin
+  - Created EpicSelectionView component with loading/error/empty states
+  - Created EpicSelectionApp wrapper with keyboard navigation (↑↓/jk, Enter/r, q)
+  - Updated run.tsx to show epic selection TUI when --epic not provided
+  - showEpicSelectionTui() function renders EpicSelectionApp and returns selected epic
+  - Selected epic ID applied to config and tracker before engine starts
+- Files changed:
+  - src/plugins/trackers/types.ts (updated) - Added getEpics() to TrackerPlugin interface
+  - src/plugins/trackers/base.ts (updated) - Added default getEpics() implementation
+  - src/plugins/trackers/builtin/beads.ts (updated) - Added getEpics(), setEpicId(), getEpicId()
+  - src/plugins/trackers/builtin/beads-bv.ts (updated) - Removed private getEpicId() (uses parent)
+  - src/plugins/trackers/builtin/json.ts (updated) - Added getEpics() for prd.json projects
+  - src/tui/components/EpicSelectionView.tsx (new) - Epic list display component
+  - src/tui/components/EpicSelectionApp.tsx (new) - Epic selection wrapper with keyboard
+  - src/tui/components/index.ts (updated) - Added EpicSelectionView/App exports
+  - src/commands/run.tsx (updated) - Epic selection flow when --epic not specified
+- **Learnings:**
+  - TrackerPlugin interface extension allows optional behaviors across all trackers
+  - Epic selection happens early in flow (before session/lock), modifies config in place
+  - Epics filtered by type='epic' and no parent (top-level only), plus open/in_progress status
+  - BeadsTrackerPlugin stores epicId in private field, beads-bv inherits via public getter
+  - Using createCliRenderer with multiple root.render() calls requires cleanup between UIs
+---

@@ -148,6 +148,17 @@ export abstract class BaseTrackerPlugin implements TrackerPlugin {
   }
 
   /**
+   * Get all available epics (top-level task containers).
+   * Default implementation fetches tasks with type='epic' and no parent.
+   * Subclasses can override for more efficient implementation.
+   */
+  async getEpics(): Promise<TrackerTask[]> {
+    const tasks = await this.getTasks({ type: 'epic' });
+    // Filter to only top-level epics (no parent)
+    return tasks.filter((t) => !t.parentId);
+  }
+
+  /**
    * Get setup questions for configuring this plugin.
    * Subclasses should override to provide their specific questions.
    */

@@ -720,7 +720,7 @@ export class BeadsBvTrackerPlugin extends BeadsTrackerPlugin {
     }
   }
 
-  // Helper methods to access config values (since parent properties are private)
+  // Helper methods to access config values (since parent properties are protected)
   private getWorkingDir(): string {
     return (this.config.workingDir as string) ?? process.cwd();
   }
@@ -729,9 +729,7 @@ export class BeadsBvTrackerPlugin extends BeadsTrackerPlugin {
     return (this.config.beadsDir as string) ?? '.beads';
   }
 
-  private getEpicId(): string {
-    return (this.config.epicId as string) ?? '';
-  }
+  // Note: getEpicId() is now inherited from BeadsTrackerPlugin (public)
 
   private getLabels(): string[] {
     const labels = this.config.labels;

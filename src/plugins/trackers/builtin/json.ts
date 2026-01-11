@@ -416,6 +416,42 @@ export class JsonTrackerPlugin extends BaseTrackerPlugin {
   getBranchName(): string {
     return this.branchName || this.prdCache?.branchName || '';
   }
+
+  /**
+   * Get available "epics" from the JSON tracker.
+   * For prd.json, each file is essentially one epic (the project itself).
+   * Returns a single task representing the project/feature being tracked.
+   */
+  override async getEpics(): Promise<TrackerTask[]> {
+    if (!this.filePath) {
+      return [];
+    }
+
+    try {
+      const prd = await this.readPrd();
+
+      // Create a synthetic "epic" task representing the prd.json project
+      const epic: TrackerTask = {
+        id: `prd:${prd.name}`,
+        title: prd.name,
+        status: 'open',
+        priority: 1,
+        description: prd.description,
+        type: 'epic',
+        metadata: {
+          filePath: this.filePath,
+          branchName: prd.branchName,
+          storyCount: prd.userStories.length,
+          completedCount: prd.userStories.filter((s) => s.passes).length,
+        },
+      };
+
+      return [epic];
+    } catch (err) {
+      console.error('Failed to read prd.json for getEpics:', err);
+      return [];
+    }
+  }
 }
 
 /**

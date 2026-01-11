@@ -37,7 +37,9 @@ import { registerBuiltinTrackers } from '../plugins/trackers/builtin/index.js';
 import { getAgentRegistry } from '../plugins/agents/registry.js';
 import { getTrackerRegistry } from '../plugins/trackers/registry.js';
 import { RunApp } from '../tui/components/RunApp.js';
-import type { TrackerTask } from '../plugins/trackers/types.js';
+import { EpicSelectionApp } from '../tui/components/EpicSelectionApp.js';
+import type { TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
+import { BeadsTrackerPlugin } from '../plugins/trackers/builtin/beads.js';
 import type { RalphConfig } from '../config/types.js';
 import { projectConfigExists, runSetupWizard } from '../setup/index.js';
 import { createInterruptHandler } from '../interruption/index.js';
@@ -156,7 +158,7 @@ ralph-tui run - Start Ralph execution
 Usage: ralph-tui run [options]
 
 Options:
-  --epic <id>         Epic ID for beads tracker
+  --epic <id>         Epic ID for beads tracker (if omitted, shows epic selection)
   --prd <path>        PRD file path for json tracker
   --agent <name>      Override agent plugin (e.g., claude, opencode)
   --model <name>      Override model (e.g., opus, sonnet)
@@ -269,6 +271,52 @@ async function promptResumeOrNew(cwd: string): Promise<'resume' | 'new' | 'abort
     console.log('Starting fresh session...');
     return 'new';
   }
+}
+
+/**
+ * Show epic selection TUI and wait for user to select an epic.
+ * Returns the selected epic, or undefined if user quits.
+ */
+async function showEpicSelectionTui(
+  tracker: TrackerPlugin
+): Promise<TrackerTask | undefined> {
+  return new Promise(async (resolve) => {
+    const renderer = await createCliRenderer({
+      exitOnCtrlC: false,
+    });
+
+    const root = createRoot(renderer);
+
+    const cleanup = () => {
+      renderer.destroy();
+    };
+
+    const handleEpicSelected = (epic: TrackerTask) => {
+      cleanup();
+      resolve(epic);
+    };
+
+    const handleQuit = () => {
+      cleanup();
+      resolve(undefined);
+    };
+
+    // Handle Ctrl+C during epic selection
+    const handleSigint = () => {
+      cleanup();
+      resolve(undefined);
+    };
+
+    process.on('SIGINT', handleSigint);
+
+    root.render(
+      <EpicSelectionApp
+        tracker={tracker}
+        onEpicSelected={handleEpicSelected}
+        onQuit={handleQuit}
+      />
+    );
+  });
 }
 
 /**
@@ -700,6 +748,36 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   // Show warnings
   for (const warning of validation.warnings) {
     console.warn(`Warning: ${warning}`);
+  }
+
+  // If using beads tracker without epic, show epic selection TUI
+  const isBeadsTracker = config.tracker.plugin === 'beads' || config.tracker.plugin === 'beads-bv';
+  if (isBeadsTracker && !config.epicId && config.showTui) {
+    console.log('No epic specified. Loading epic selection...');
+
+    // Get tracker instance for epic selection
+    const trackerRegistry = getTrackerRegistry();
+    const tracker = await trackerRegistry.getInstance(config.tracker);
+
+    // Show epic selection TUI
+    const selectedEpic = await showEpicSelectionTui(tracker);
+
+    if (!selectedEpic) {
+      console.log('Epic selection cancelled.');
+      process.exit(0);
+    }
+
+    // Update config with selected epic
+    config.epicId = selectedEpic.id;
+    config.tracker.options.epicId = selectedEpic.id;
+
+    // If the tracker has a setEpicId method, call it
+    if (tracker instanceof BeadsTrackerPlugin) {
+      tracker.setEpicId(selectedEpic.id);
+    }
+
+    console.log(`Selected epic: ${selectedEpic.id} - ${selectedEpic.title}`);
+    console.log('');
   }
 
   // Check for existing persisted session file

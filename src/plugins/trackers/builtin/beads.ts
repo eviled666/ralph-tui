@@ -517,6 +517,60 @@ export class BeadsTrackerPlugin extends BaseTrackerPlugin {
       (t) => t.status === 'completed' || t.status === 'cancelled'
     );
   }
+
+  /**
+   * Get all available epics from the beads tracker.
+   * Queries for beads with type='epic' and open/in_progress status.
+   */
+  override async getEpics(): Promise<TrackerTask[]> {
+    // Query for epics using bd list with type filter
+    const args = ['list', '--json', '--type', 'epic'];
+
+    // Filter by labels if configured
+    if (this.labels.length > 0) {
+      args.push('--label', this.labels.join(','));
+    }
+
+    const { stdout, exitCode, stderr } = await execBd(args, this.workingDir);
+
+    if (exitCode !== 0) {
+      console.error('bd list --type epic failed:', stderr);
+      return [];
+    }
+
+    // Parse JSON output
+    let beads: BeadJson[];
+    try {
+      beads = JSON.parse(stdout) as BeadJson[];
+    } catch (err) {
+      console.error('Failed to parse bd list output:', err);
+      return [];
+    }
+
+    // Convert to TrackerTask and filter to top-level epics (no parent)
+    // Also include open/in_progress epics only (not closed)
+    const tasks = beads.map(beadToTask);
+    return tasks.filter(
+      (t) =>
+        !t.parentId &&
+        (t.status === 'open' || t.status === 'in_progress')
+    );
+  }
+
+  /**
+   * Set the epic ID for filtering tasks.
+   * Used when user selects an epic from the TUI.
+   */
+  setEpicId(epicId: string): void {
+    this.epicId = epicId;
+  }
+
+  /**
+   * Get the currently configured epic ID.
+   */
+  getEpicId(): string {
+    return this.epicId;
+  }
 }
 
 /**

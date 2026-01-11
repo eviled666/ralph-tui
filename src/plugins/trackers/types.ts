@@ -309,6 +309,14 @@ export interface TrackerPlugin {
   isTaskReady(id: string): Promise<boolean>;
 
   /**
+   * Get all available epics (top-level task containers).
+   * An epic is typically a task with type='epic' and no parent.
+   * Used for epic selection UI when no specific epic is configured.
+   * @returns Array of epic tasks
+   */
+  getEpics(): Promise<TrackerTask[]>;
+
+  /**
    * Get setup questions for configuring this plugin.
    * Used by the setup wizard to collect configuration.
    * @returns Array of questions to ask during setup
