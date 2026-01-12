@@ -34,7 +34,7 @@ Usage: ralph-tui [command] [options]
 
 Commands:
   (none)              Launch the interactive TUI
-  create-prd [opts]   Create a new PRD interactively (aliases: prd, prime)
+  create-prd [opts]   Create a new PRD interactively (alias: prime)
   convert [options]   Convert PRD markdown to JSON format
   run [options]       Start Ralph execution
   resume [options]    Resume an interrupted session
@@ -113,8 +113,8 @@ async function handleSubcommand(args: string[]): Promise<boolean> {
     return true;
   }
 
-  // Create-PRD command (with aliases: prd, prime)
-  if (command === 'create-prd' || command === 'prd' || command === 'prime') {
+  // Create-PRD command (with alias: prime)
+  if (command === 'create-prd' || command === 'prime') {
     await executeCreatePrdCommand(args.slice(1));
     return true;
   }

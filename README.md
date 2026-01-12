@@ -303,7 +303,7 @@ Ralph TUI includes these skills (installed during `ralph-tui setup`):
 | `ralph-tui status [options]` | Check session status (headless, for CI/scripts) |
 | `ralph-tui logs [options]` | View/manage iteration output logs |
 | `ralph-tui setup` | Run interactive project setup (alias: `init`) |
-| `ralph-tui create-prd [options]` | Create a new PRD interactively (alias: `prd`) |
+| `ralph-tui create-prd [options]` | Create a new PRD interactively (alias: `prime`) |
 | `ralph-tui convert [options]` | Convert PRD markdown to JSON format |
 | `ralph-tui config show` | Display merged configuration |
 | `ralph-tui template show` | Display current prompt template |
