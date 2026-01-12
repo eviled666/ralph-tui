@@ -149,7 +149,7 @@ export function ChatView({
           paddingTop: 1,
         }}
       >
-        <scrollbox style={{ flexGrow: 1 }}>
+        <scrollbox style={{ flexGrow: 1 }} stickyScroll={true} stickyStart="bottom">
           {/* Welcome message if no messages */}
           {messages.length === 0 && !isLoading && (
             <box style={{ marginBottom: 1 }}>
