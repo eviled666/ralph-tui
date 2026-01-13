@@ -306,6 +306,11 @@ export function RunApp({
   // Start in 'ready' state if we have onStart callback (waiting for user to start)
   const [status, setStatus] = useState<RalphStatus>(onStart ? 'ready' : 'running');
   const [currentIteration, setCurrentIteration] = useState(0);
+  const [maxIterations, setMaxIterations] = useState(() => {
+    // Initialize from engine if available
+    const info = engine.getIterationInfo();
+    return info.maxIterations;
+  });
   const [currentOutput, setCurrentOutput] = useState('');
   // Streaming parser for live output - extracts readable content and prevents memory bloat
   const outputParserRef = useRef(new StreamingOutputParser());
@@ -600,6 +605,11 @@ export function RunApp({
           // Update task list with fresh data from tracker
           setTasks(convertTasksWithDependencyStatus(event.tasks));
           break;
+
+        case 'engine:iterations-added':
+          // Update maxIterations state when iterations are added at runtime
+          setMaxIterations(event.newMax);
+          break;
       }
     });
 
@@ -797,6 +807,15 @@ export function RunApp({
         case 'r':
           // Refresh task list from tracker
           engine.refreshTasks();
+          break;
+
+        case '+':
+        case '=':
+          // Add 10 iterations to maxIterations (extends the session without stopping)
+          // Handle both '+' (key.name) and Shift+= (key.sequence === '+')
+          if (key.name === '+' || key.sequence === '+') {
+            engine.addIterations(10);
+          }
           break;
 
         case ',':
@@ -1093,6 +1112,8 @@ export function RunApp({
         trackerName={trackerName}
         activeAgentState={activeAgentState}
         rateLimitState={rateLimitState}
+        currentIteration={currentIteration}
+        maxIterations={maxIterations}
       />
 
       {/* Progress Dashboard - toggleable with 'd' key */}

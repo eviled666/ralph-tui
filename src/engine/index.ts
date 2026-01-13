@@ -34,7 +34,7 @@ import { getTrackerRegistry } from '../plugins/trackers/registry.js';
 import { SubagentTraceParser } from '../plugins/agents/tracing/parser.js';
 import type { SubagentEvent } from '../plugins/agents/tracing/types.js';
 import { ClaudeAgentPlugin } from '../plugins/agents/builtin/claude.js';
-import { updateSessionIteration, updateSessionStatus } from '../session/index.js';
+import { updateSessionIteration, updateSessionStatus, updateSessionMaxIterations } from '../session/index.js';
 import { saveIterationLog, buildSubagentTrace, createProgressEntry, appendProgress, getRecentProgressSummary } from '../logs/index.js';
 import type { AgentSwitchEntry } from '../logs/index.js';
 import { renderPrompt } from '../templates/index.js';
@@ -1033,6 +1033,48 @@ export class ExecutionEngine {
    */
   isPausing(): boolean {
     return this.state.status === 'pausing';
+  }
+
+  /**
+   * Add iterations to maxIterations at runtime.
+   * Useful for extending a session without stopping.
+   * @param count - Number of iterations to add (must be positive)
+   */
+  async addIterations(count: number): Promise<void> {
+    if (count <= 0) {
+      return;
+    }
+
+    const previousMax = this.config.maxIterations;
+    // Handle unlimited case (0 means unlimited)
+    const newMax = previousMax === 0 ? 0 : previousMax + count;
+
+    // Update config
+    this.config.maxIterations = newMax;
+
+    // Persist to session
+    await updateSessionMaxIterations(this.config.cwd, newMax);
+
+    // Emit event
+    this.emit({
+      type: 'engine:iterations-added',
+      timestamp: new Date().toISOString(),
+      added: count,
+      newMax,
+      previousMax,
+      currentIteration: this.state.currentIteration,
+    });
+  }
+
+  /**
+   * Get current iteration info.
+   * @returns Object with currentIteration and maxIterations
+   */
+  getIterationInfo(): { currentIteration: number; maxIterations: number } {
+    return {
+      currentIteration: this.state.currentIteration,
+      maxIterations: this.config.maxIterations,
+    };
   }
 
   /**
