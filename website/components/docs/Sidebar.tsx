@@ -11,10 +11,9 @@ import Link from 'next/link';
 import { docsNavigation } from '@/lib/navigation';
 import { SidebarNavItem } from './SidebarNav';
 
-// Use environment variable for version (set during build)
-// Fallback to '0.0.0' for development
-const version = typeof process !== 'undefined' && process.env.npm_package_version 
-  ? process.env.npm_package_version 
+// Version exposed via next.config.mjs env
+const version = typeof process !== 'undefined' && process.env.NEXT_PUBLIC_VERSION
+  ? process.env.NEXT_PUBLIC_VERSION
   : '0.0.0';
 
 interface SidebarProps {
