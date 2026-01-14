@@ -819,9 +819,10 @@ export function RunApp({
         case '-':
         case '_':
           // Add/remove 10 iterations - works with or without shift
-          // key.name: '+' or '-' | key.sequence: '+' (Shift+=) or '_' (Shift+-)
-          const isPlus = key.name === '+' || key.sequence === '+';
-          const isMinus = key.name === '-' || key.sequence === '-';
+          // On most keyboards: Shift+= produces '+' sequence, plain '=' produces '=' name
+          // On numpad: plain '+' might produce '+' name
+          const isPlus = key.name === '+' || key.name === '=' || key.sequence === '+';
+          const isMinus = key.name === '-' || key.name === '_' || key.sequence === '-';
           if ((isPlus || isMinus) &&
               (status === 'ready' || status === 'running' || status === 'executing' || status === 'paused' || status === 'stopped' || status === 'idle' || status === 'complete')) {
             if (isPlus) {
