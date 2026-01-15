@@ -73,6 +73,15 @@ export interface SandboxConfig {
   image?: string;
 }
 
+export const DEFAULT_SANDBOX_CONFIG: Required<
+  Pick<SandboxConfig, 'enabled' | 'mode' | 'network' | 'image'>
+> = {
+  enabled: false,
+  mode: 'auto',
+  network: true,
+  image: 'ubuntu:22.04',
+};
+
 /**
  * Runtime options that can be passed via CLI flags
  */
@@ -127,6 +136,8 @@ export interface RuntimeOptions {
 
   /** Override notifications enabled state (--notify or --no-notify CLI flags) */
   notify?: boolean;
+
+  sandbox?: SandboxConfig;
 }
 
 /**
@@ -282,4 +293,5 @@ export const DEFAULT_CONFIG: Omit<RalphConfig, 'agent' | 'tracker'> = {
   progressFile: '.ralph-tui/progress.md',
   showTui: true,
   errorHandling: DEFAULT_ERROR_HANDLING,
+  sandbox: DEFAULT_SANDBOX_CONFIG,
 };
