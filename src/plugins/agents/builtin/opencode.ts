@@ -165,6 +165,15 @@ export class OpenCodeAgentPlugin extends BaseAgentPlugin {
     };
   }
 
+  override getSandboxRequirements() {
+    return {
+      authPaths: ['~/.opencode', '~/.config/opencode'],
+      binaryPaths: ['/usr/local/bin', '~/.local/bin', '~/go/bin'],
+      runtimePaths: [],
+      requiresNetwork: true,
+    };
+  }
+
   /**
    * Run --version to verify binary and extract version number
    */
