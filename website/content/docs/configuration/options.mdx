@@ -367,19 +367,17 @@ These flags override config file settings. Use with any execution command.
 
 #### Prompt Template Precedence
 
-Ralph TUI resolves prompt templates in this order (highest to lowest priority):
+Ralph TUI resolves prompt templates in this order (first match wins):
 
 | Priority | Source | Description |
 |----------|--------|-------------|
-| 1 | `--prompt <path>` CLI flag | Explicit path provided at runtime |
-| 2 | `prompt_template` in config | Path in project or global config |
-| 3 | `.ralph-tui/templates/{tracker}.hbs` | Project-level template (per tracker) |
-| 4 | `~/.config/ralph-tui/templates/{tracker}.hbs` | User-level template (per tracker) |
-| 5 | Tracker plugin template | Template from tracker's `getTemplate()` method |
-| 6 | Built-in default | Bundled fallback template |
+| 1 | CLI or config path | `--prompt <path>` flag or `prompt_template` in config |
+| 2 | Project template | `.ralph-tui-prompt.hbs` or path in `.ralph-tui/config.toml` |
+| 3 | User template | `~/.config/ralph-tui/prompt.md` or `prompt-{tracker}.md` |
+| 4 | Built-in default | Bundled fallback template for the tracker type |
 
 <Callout type="tip">
-Use `ralph-tui template view` to see which template would be used, and `ralph-tui template create` to scaffold a custom template at the appropriate location.
+Use `ralph-tui template show` to see which template would be used, and `ralph-tui template init` to scaffold a custom template at the appropriate location.
 </Callout>
 
 ### Notification Options
