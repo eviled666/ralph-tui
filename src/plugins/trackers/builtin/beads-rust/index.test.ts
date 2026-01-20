@@ -1,6 +1,6 @@
 /**
- * ABOUTME: Tests for BeadsRustTrackerPlugin detection logic.
- * Verifies .beads directory detection, br binary checks, and version parsing.
+ * ABOUTME: Tests for BeadsRustTrackerPlugin br CLI integration.
+ * Verifies detection, task listing, and single-task retrieval via JSON output.
  */
 
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
@@ -218,6 +218,107 @@ describe('BeadsRustTrackerPlugin', () => {
 
       expect(tasks[0]?.status).toBe('completed');
       expect(tasks[0]?.priority).toBe(4);
+    });
+  });
+
+  describe('getTask', () => {
+    test('executes br show <id> --json', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Task 1', status: 'open', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const task = await plugin.getTask('t1');
+
+      expect(task?.id).toBe('t1');
+      expect(mockSpawnArgs.length).toBe(1);
+      expect(mockSpawnArgs[0]?.cmd).toBe('br');
+      expect(mockSpawnArgs[0]?.args).toEqual(['show', 't1', '--json']);
+    });
+
+    test('returns undefined when task is not found', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        { exitCode: 1, stderr: 'not found' },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const task = await plugin.getTask('missing');
+
+      expect(task).toBeUndefined();
+      expect(mockSpawnArgs[0]?.args).toEqual(['show', 'missing', '--json']);
+    });
+
+    test('parses dependency information', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              id: 't1',
+              title: 'Task 1',
+              status: 'open',
+              priority: 2,
+              dependencies: [
+                {
+                  id: 'dep1',
+                  title: 'Dep 1',
+                  status: 'open',
+                  dependency_type: 'blocks',
+                },
+                {
+                  id: 'parent1',
+                  title: 'Parent 1',
+                  status: 'open',
+                  dependency_type: 'parent-child',
+                },
+              ],
+              dependents: [
+                {
+                  id: 'child1',
+                  title: 'Child 1',
+                  status: 'open',
+                  dependency_type: 'blocks',
+                },
+              ],
+            },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+
+      const task = await plugin.getTask('t1');
+
+      expect(task?.dependsOn).toEqual(['dep1']);
+      expect(task?.blocks).toEqual(['child1']);
+    });
+
+    test('returns undefined when br show returns an empty array', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        { exitCode: 0, stdout: JSON.stringify([]) },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+
+      const task = await plugin.getTask('t1');
+      expect(task).toBeUndefined();
     });
   });
 });

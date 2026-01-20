@@ -36,6 +36,20 @@ interface BrTaskJson {
   updated_at?: string;
   labels?: string[];
   parent?: string;
+  dependency_count?: number;
+  dependent_count?: number;
+  dependencies?: Array<{
+    id: string;
+    title: string;
+    status: string;
+    dependency_type: 'blocks' | 'parent-child';
+  }>;
+  dependents?: Array<{
+    id: string;
+    title: string;
+    status: string;
+    dependency_type: 'blocks' | 'parent-child';
+  }>;
 }
 
 /**
@@ -140,12 +154,39 @@ function mapPriority(priority: number): TaskPriority {
  * Convert a BrTaskJson object to TrackerTask.
  */
 function brTaskToTask(task: BrTaskJson): TrackerTask {
+  const dependsOn: string[] = [];
+  const blocks: string[] = [];
+
+  if (task.dependencies) {
+    for (const dep of task.dependencies) {
+      if (dep.dependency_type === 'blocks') {
+        dependsOn.push(dep.id);
+      }
+    }
+  }
+
+  if (task.dependents) {
+    for (const dep of task.dependents) {
+      if (dep.dependency_type === 'blocks') {
+        blocks.push(dep.id);
+      }
+    }
+  }
+
   // Infer parentId from task ID if not provided.
   // e.g., "ralph-tui-45r.37" -> parent is "ralph-tui-45r"
   let parentId = task.parent;
   if (!parentId && task.id.includes('.')) {
     const lastDotIndex = task.id.lastIndexOf('.');
     parentId = task.id.substring(0, lastDotIndex);
+  }
+
+  const metadata: Record<string, unknown> = {};
+  if (typeof task.dependency_count === 'number') {
+    metadata.dependencyCount = task.dependency_count;
+  }
+  if (typeof task.dependent_count === 'number') {
+    metadata.dependentCount = task.dependent_count;
   }
 
   return {
@@ -157,9 +198,12 @@ function brTaskToTask(task: BrTaskJson): TrackerTask {
     labels: task.labels,
     type: task.issue_type,
     parentId,
+    dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
+    blocks: blocks.length > 0 ? blocks : undefined,
     assignee: task.owner,
     createdAt: task.created_at,
     updatedAt: task.updated_at,
+    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
   };
 }
 
@@ -306,6 +350,32 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
     tasks = this.filterTasks(tasks, filterWithoutParent);
 
     return tasks;
+  }
+
+  override async getTask(id: string): Promise<TrackerTask | undefined> {
+    const { stdout, exitCode, stderr } = await execBr(
+      ['show', id, '--json'],
+      this.workingDir
+    );
+
+    if (exitCode !== 0) {
+      console.error(`br show ${id} failed:`, stderr);
+      return undefined;
+    }
+
+    let tasksJson: BrTaskJson[];
+    try {
+      tasksJson = JSON.parse(stdout) as BrTaskJson[];
+    } catch (err) {
+      console.error('Failed to parse br show output:', err);
+      return undefined;
+    }
+
+    if (tasksJson.length === 0) {
+      return undefined;
+    }
+
+    return brTaskToTask(tasksJson[0]!);
   }
 
   async completeTask(id: string): Promise<TaskCompletionResult> {
