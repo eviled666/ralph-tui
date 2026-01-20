@@ -436,9 +436,11 @@ export class BeadsBvTrackerPlugin extends BeadsTrackerPlugin {
         );
       }
 
-      // Return the top recommendation
+      // Return the top recommendation, or fall back to base beads if no bv matches
+      // This handles the case where bv's global top-N recommendations don't include
+      // any tasks from the current epic (e.g., when working on a less-prominent epic)
       if (recommendations.length === 0) {
-        return undefined;
+        return super.getNextTask(filter);
       }
 
       const topRec = recommendations[0]!;
