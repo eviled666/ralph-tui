@@ -90,18 +90,6 @@ function parseOpenCodeJsonLine(jsonLine: string): AgentDisplayEvent[] {
 }
 
 /**
- * Parse opencode JSON stream output into display events.
- */
-function parseOpenCodeOutputToEvents(data: string): AgentDisplayEvent[] {
-  const allEvents: AgentDisplayEvent[] = [];
-  for (const line of data.split('\n')) {
-    const events = parseOpenCodeJsonLine(line.trim());
-    allEvents.push(...events);
-  }
-  return allEvents;
-}
-
-/**
  * OpenCode agent plugin implementation.
  * Uses the `opencode run` command for non-interactive AI coding tasks.
  *
@@ -392,6 +380,43 @@ export class OpenCodeAgentPlugin extends BaseAgentPlugin {
   ): AgentExecutionHandle {
     let buffer = '';
 
+    // Helper to process a single JSONL line
+    const processLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+
+      // Parse raw JSONL lines and forward to onJsonlMessage for subagent tracing
+      if (options?.onJsonlMessage) {
+        if (trimmed.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            options.onJsonlMessage(parsed);
+          } catch {
+            // Not valid JSON, skip
+          }
+        }
+      }
+
+      // Process for display events
+      const events = parseOpenCodeJsonLine(trimmed);
+      if (events.length > 0) {
+        // Call TUI-native segments callback if provided
+        if (options?.onStdoutSegments) {
+          const segments = processAgentEventsToSegments(events);
+          if (segments.length > 0) {
+            options.onStdoutSegments(segments);
+          }
+        }
+        // Also call legacy string callback if provided
+        if (options?.onStdout) {
+          const parsed = processAgentEvents(events);
+          if (parsed.length > 0) {
+            options.onStdout(parsed);
+          }
+        }
+      }
+    };
+
     // Wrap callbacks to parse JSON events
     const parsedOptions: AgentExecuteOptions = {
       ...options,
@@ -406,42 +431,20 @@ export class OpenCodeAgentPlugin extends BaseAgentPlugin {
             buffer = lines.pop() ?? ''; // Keep the last partial line (or empty string) in buffer
 
             for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-
-              // Parse raw JSONL lines and forward to onJsonlMessage for subagent tracing
-              if (options?.onJsonlMessage) {
-                if (trimmed.startsWith('{')) {
-                  try {
-                    const parsed = JSON.parse(trimmed);
-                    options.onJsonlMessage(parsed);
-                  } catch {
-                    // Not valid JSON, skip
-                  }
-                }
-              }
-
-              // Process for display events
-              const events = parseOpenCodeJsonLine(trimmed);
-              if (events.length > 0) {
-                // Call TUI-native segments callback if provided
-                if (options?.onStdoutSegments) {
-                  const segments = processAgentEventsToSegments(events);
-                  if (segments.length > 0) {
-                    options.onStdoutSegments(segments);
-                  }
-                }
-                // Also call legacy string callback if provided
-                if (options?.onStdout) {
-                  const parsed = processAgentEvents(events);
-                  if (parsed.length > 0) {
-                    options.onStdout(parsed);
-                  }
-                }
-              }
+              processLine(line);
             }
           }
         : undefined,
+      // Wrap onEnd to flush any remaining buffered content
+      onEnd: (result) => {
+        // Flush buffer: process any remaining content that didn't end with a newline
+        if (buffer.length > 0) {
+          processLine(buffer);
+          buffer = '';
+        }
+        // Call the original onEnd if provided
+        options?.onEnd?.(result);
+      },
     };
 
     return super.execute(prompt, files, parsedOptions);
