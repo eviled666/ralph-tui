@@ -130,8 +130,8 @@ export async function loadBundledPrdSkill(agent: AgentPlugin): Promise<string | 
   if (!skillsPaths) return undefined;
 
   // Try personal skills directory first (e.g., ~/.kiro/skills/)
-  const personalPath = skillsPaths.personal?.replace('~', process.env.HOME || '');
-  if (personalPath) {
+  if (skillsPaths.personal) {
+    const personalPath = skillsPaths.personal.replace(/^~/, process.env.HOME || '');
     const skillFile = join(personalPath, 'ralph-tui-prd', 'SKILL.md');
     try {
       await access(skillFile, constants.R_OK);
@@ -145,9 +145,8 @@ export async function loadBundledPrdSkill(agent: AgentPlugin): Promise<string | 
   }
 
   // Try repo skills directory (e.g., .kiro/skills/)
-  const repoPath = skillsPaths.repo;
-  if (repoPath) {
-    const skillFile = join(process.cwd(), repoPath, 'ralph-tui-prd', 'SKILL.md');
+  if (skillsPaths.repo) {
+    const skillFile = join(process.cwd(), skillsPaths.repo, 'ralph-tui-prd', 'SKILL.md');
     try {
       await access(skillFile, constants.R_OK);
       const content = await readFile(skillFile, 'utf-8');
