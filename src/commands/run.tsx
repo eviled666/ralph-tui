@@ -42,6 +42,7 @@ import {
   type PersistedSessionState,
 } from '../session/index.js';
 import { ExecutionEngine } from '../engine/index.js';
+import { ParallelExecutor, analyzeTaskGraph, shouldRunParallel } from '../parallel/index.js';
 import { registerBuiltinAgents } from '../plugins/agents/builtin/index.js';
 import { registerBuiltinTrackers } from '../plugins/trackers/builtin/index.js';
 import { getAgentRegistry } from '../plugins/agents/registry.js';
@@ -329,6 +330,27 @@ export function parseRunArgs(args: string[]): ExtendedRuntimeOptions {
           i++;
         }
         break;
+
+      case '--serial':
+      case '--sequential':
+        options.serial = true;
+        break;
+
+      case '--parallel': {
+        // --parallel or --parallel N
+        if (nextArg && !nextArg.startsWith('-')) {
+          const parsed = parseInt(nextArg, 10);
+          if (!isNaN(parsed) && parsed > 0) {
+            options.parallel = parsed;
+            i++;
+          } else {
+            options.parallel = true;
+          }
+        } else {
+          options.parallel = true;
+        }
+        break;
+      }
     }
   }
 
@@ -371,6 +393,9 @@ Options:
   --sandbox=sandbox-exec  Force sandbox-exec (macOS)
   --no-sandbox        Disable sandboxing
   --no-network        Disable network access in sandbox
+  --serial            Force sequential execution (skip parallel analysis)
+  --sequential        Alias for --serial
+  --parallel [N]      Force parallel execution with optional max workers (default: 3)
   --listen            Enable remote listener (implies --headless)
   --listen-port <n>   Port for remote listener (default: 7890)
   --rotate-token      Rotate server token before starting listener
@@ -398,6 +423,24 @@ Examples:
   ralph-tui run --no-tui                     # Run headless for CI/scripts
   ralph-tui run --listen --prd ./prd.json    # Run with remote listener enabled
 `);
+}
+
+/**
+ * Resolve parallel execution mode from CLI flags and stored config.
+ * CLI flags take precedence over stored config.
+ *
+ * @returns 'auto' | 'always' | 'never'
+ */
+function resolveParallelMode(
+  options: ExtendedRuntimeOptions,
+  storedConfig?: StoredConfig | null
+): 'auto' | 'always' | 'never' {
+  // CLI flags take absolute precedence
+  if (options.serial) return 'never';
+  if (options.parallel) return 'always';
+
+  // Fall back to stored config
+  return storedConfig?.parallel?.mode ?? 'auto';
 }
 
 /**
@@ -1940,14 +1983,89 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     soundMode,
   };
 
-  // Run with TUI or headless
+  // Determine parallel vs sequential execution mode
+  const parallelMode = resolveParallelMode(options, storedConfig);
+
+  // Check if parallel execution should be used
+  let useParallel = false;
+  if (parallelMode !== 'never') {
+    const actionableTasks = tasks.filter(
+      (t) => t.status === 'open' || t.status === 'in_progress'
+    );
+
+    if (actionableTasks.length >= 3) {
+      const analysis = analyzeTaskGraph(actionableTasks);
+
+      if (parallelMode === 'always') {
+        useParallel = analysis.maxParallelism >= 2;
+      } else {
+        // 'auto' mode
+        useParallel = shouldRunParallel(analysis);
+      }
+
+      if (useParallel) {
+        console.log(`Parallel execution enabled: ${analysis.groups.length} group(s), max parallelism ${analysis.maxParallelism}`);
+      }
+    }
+  }
+
+  // Run parallel or sequential execution
   try {
-    if (config.showTui) {
+    if (useParallel) {
+      // Parallel execution path
+      const maxWorkers = typeof options.parallel === 'number'
+        ? options.parallel
+        : storedConfig?.parallel?.maxWorkers ?? 3;
+
+      const parallelExecutor = new ParallelExecutor(config, tracker, {
+        maxWorkers,
+        worktreeDir: storedConfig?.parallel?.worktreeDir,
+      });
+
+      // Forward parallel events to headless logger if not using TUI
+      if (!config.showTui) {
+        parallelExecutor.on((event) => {
+          const time = new Date(event.timestamp).toLocaleTimeString();
+          switch (event.type) {
+            case 'parallel:started':
+              console.log(`[${time}] [INFO] [parallel] Parallel execution started: ${event.totalTasks} tasks, ${event.totalGroups} groups, ${event.maxWorkers} workers`);
+              break;
+            case 'parallel:group-started':
+              console.log(`[${time}] [INFO] [parallel] Group ${event.groupIndex + 1}/${event.totalGroups} started: ${event.workerCount} workers`);
+              break;
+            case 'worker:started':
+              console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} started: ${event.task.title}`);
+              break;
+            case 'worker:completed':
+              console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} completed: ${event.result.task.title}`);
+              break;
+            case 'worker:failed':
+              console.log(`[${time}] [ERROR] [worker] Worker ${event.workerId} failed: ${event.error}`);
+              break;
+            case 'merge:completed':
+              console.log(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)`);
+              break;
+            case 'merge:failed':
+              console.log(`[${time}] [ERROR] [merge] Merge failed: ${event.error}`);
+              break;
+            case 'parallel:completed':
+              console.log(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms`);
+              break;
+            case 'parallel:failed':
+              console.log(`[${time}] [ERROR] [parallel] Parallel execution failed: ${event.error}`);
+              break;
+          }
+        });
+      }
+
+      await parallelExecutor.execute();
+    } else if (config.showTui) {
+      // Sequential TUI mode (existing path)
       // Pass tasks for initial TUI display in "ready" state
       // Also pass storedConfig for settings view
       persistedState = await runWithTui(engine, persistedState, config, tasks, storedConfig, notificationRunOptions);
     } else {
-      // Headless mode still auto-starts (for CI/automation)
+      // Sequential headless mode (existing path)
       persistedState = await runHeadless(engine, persistedState, config, {
         notificationOptions: notificationRunOptions,
         listenMode: options.listen,
