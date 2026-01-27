@@ -5,7 +5,7 @@
  */
 
 import { readFile, access, constants } from 'node:fs/promises';
-import { resolve, isAbsolute, join, dirname } from 'node:path';
+import { resolve, isAbsolute, join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -397,7 +397,10 @@ function getThemesDir(): string {
 
   // In dev: src/tui/theme.ts -> ../../assets/themes
   // In dist: dist/tui/theme.js -> ../assets/themes (copied during build)
-  if (currentDir.includes('/dist/') || currentDir.endsWith('/dist')) {
+  // Use path-segment-aware check for cross-platform compatibility (Windows uses backslashes)
+  const pathSegments = currentDir.split(sep);
+  const isInDist = pathSegments.includes('dist');
+  if (isInDist) {
     return join(currentDir, '..', 'assets', 'themes');
   }
   // Development: src/tui directory
