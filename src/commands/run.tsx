@@ -145,8 +145,6 @@ interface ExtendedRuntimeOptions extends RuntimeOptions {
   rotateToken?: boolean;
   /** Merge directly to current branch instead of creating session branch (parallel mode) */
   directMerge?: boolean;
-  /** Enable debug logging for parallel execution diagnostics */
-  debug?: boolean;
 }
 
 /**
@@ -366,10 +364,6 @@ export function parseRunArgs(args: string[]): ExtendedRuntimeOptions {
       case '--direct-merge':
         options.directMerge = true;
         break;
-
-      case '--debug':
-        options.debug = true;
-        break;
     }
   }
 
@@ -416,7 +410,6 @@ Options:
   --sequential        Alias for --serial
   --parallel [N]      Force parallel execution with optional max workers (default: 3)
   --direct-merge      Merge directly to current branch (skip session branch creation)
-  --debug             Enable debug logging (creates parallel-debug-*.log in project dir)
   --listen            Enable remote listener (implies --headless)
   --listen-port <n>   Port for remote listener (default: 7890)
   --rotate-token      Rotate server token before starting listener
@@ -2561,7 +2554,6 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         maxWorkers,
         worktreeDir: storedConfig?.parallel?.worktreeDir,
         directMerge,
-        debug: options.debug,
       });
 
       // Track session branch info for completion guidance

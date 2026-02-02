@@ -323,14 +323,6 @@ export interface ParallelExecutorConfig {
    * of merging directly to the current branch.
    */
   directMerge?: boolean;
-
-  /**
-   * Enable debug logging to a file in the project directory.
-   * When true, creates a `parallel-debug-{timestamp}.log` file with detailed
-   * diagnostic information about git operations, worktrees, and merges.
-   * Useful for troubleshooting parallel execution issues.
-   */
-  debug?: boolean;
 }
 
 /**

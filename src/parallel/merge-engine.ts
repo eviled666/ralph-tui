@@ -65,7 +65,6 @@ import type {
   ParallelEventListener,
   ParallelEvent,
 } from './events.js';
-import { debugLog, logBranchCommits } from './debug-log.js';
 
 /**
  * Sequential merge queue that processes completed worker branches.
@@ -159,12 +158,6 @@ export class MergeEngine {
     this.git(['checkout', '-b', branchName]);
     this.sessionBranch = branchName;
 
-    debugLog('MERGE-ENGINE', 'Created session branch', {
-      sessionBranch: branchName,
-      originalBranch: currentBranch,
-      sessionId,
-    });
-
     return { branch: branchName, original: currentBranch };
   }
 
@@ -196,16 +189,7 @@ export class MergeEngine {
     try {
       validateGitRef(this.originalBranch, 'originalBranch');
       this.git(['checkout', this.originalBranch]);
-
-      debugLog('MERGE-ENGINE', 'Returned to original branch', {
-        originalBranch: this.originalBranch,
-        sessionBranch: this.sessionBranch,
-      });
-    } catch (err) {
-      debugLog('MERGE-ENGINE', 'Failed to return to original branch', {
-        originalBranch: this.originalBranch,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    } catch {
       // Don't throw — best effort to return to original branch
     }
   }
@@ -376,13 +360,6 @@ export class MergeEngine {
     operation.startedAt = new Date().toISOString();
     this.updateStatus(operation, 'in-progress');
 
-    debugLog('MERGE-ENGINE', `Starting merge for ${taskId}`, {
-      taskId,
-      operationId: operation.id,
-      sourceBranch: operation.sourceBranch,
-      worktreePath: operation.workerResult.worktreePath,
-    });
-
     this.emit({
       type: 'merge:started',
       timestamp: operation.startedAt,
@@ -393,10 +370,6 @@ export class MergeEngine {
 
     // Pre-flight: verify branch has commits
     if (!this.branchHasCommits(operation.sourceBranch)) {
-      debugLog('MERGE-ENGINE', `FAILING merge - no commits for ${taskId}`, {
-        taskId,
-        sourceBranch: operation.sourceBranch,
-      });
       const result = this.failMerge(
         operation,
         'No commits to merge. The agent may have completed the task but created no committable files. ' +
@@ -606,23 +579,8 @@ export class MergeEngine {
       validateGitRef(branchName, 'branchName');
       const output = this.git(['rev-list', '--count', `HEAD..${branchName}`]);
       const count = parseInt(output.trim(), 10);
-      const hasCommits = count > 0;
-
-      debugLog('MERGE-ENGINE', `branchHasCommits check for ${branchName}`, {
-        branchName,
-        commitsAhead: count,
-        hasCommits,
-        cwd: this.cwd,
-      });
-      logBranchCommits('MERGE-ENGINE', this.cwd, branchName);
-
-      return hasCommits;
-    } catch (err) {
-      debugLog('MERGE-ENGINE', `branchHasCommits FAILED for ${branchName}`, {
-        branchName,
-        error: err instanceof Error ? err.message : String(err),
-        cwd: this.cwd,
-      });
+      return count > 0;
+    } catch {
       return false;
     }
   }

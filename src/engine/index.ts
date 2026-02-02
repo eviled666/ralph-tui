@@ -44,7 +44,6 @@ import {
 import { updateSessionIteration, updateSessionStatus, updateSessionMaxIterations } from '../session/index.js';
 import { saveIterationLog, buildSubagentTrace, getRecentProgressSummary, getCodebasePatternsForPrompt } from '../logs/index.js';
 import { performAutoCommit } from './auto-commit.js';
-import { debugLog } from '../parallel/debug-log.js';
 import type { AgentSwitchEntry } from '../logs/index.js';
 import { renderPrompt } from '../templates/index.js';
 
@@ -1926,14 +1925,6 @@ export class ExecutionEngine {
    * Failures never halt engine execution.
    */
   private async handleAutoCommit(task: TrackerTask, iteration: number): Promise<void> {
-    debugLog('ENGINE', `handleAutoCommit called for ${task.id}`, {
-      taskId: task.id,
-      taskTitle: task.title,
-      engineCwd: this.config.cwd,
-      iteration,
-      autoCommitEnabled: this.config.autoCommit,
-    });
-
     try {
       const result = await performAutoCommit(this.config.cwd, task.id, task.title);
       if (result.committed) {
