@@ -49,8 +49,24 @@ function sanitizeBranchName(taskId: string): string {
 /** Default minimum free disk space (500 MB) before creating a worktree */
 const DEFAULT_MIN_FREE_DISK_SPACE = 500 * 1024 * 1024;
 
-/** Default worktree directory relative to project root */
-const DEFAULT_WORKTREE_DIR = '.ralph-tui/worktrees';
+/**
+ * Compute a worktree base directory as a SIBLING of the project.
+ *
+ * CRITICAL: Worktrees must be outside the project directory to prevent
+ * Claude CLI's project detection from walking up and finding the parent's
+ * .git directory. When worktrees were inside .ralph-tui/worktrees/, Claude
+ * would detect the parent project and write files there instead of the worktree.
+ *
+ * Standard practice: create worktrees as siblings of the main repo.
+ * Uses: {parent}/.ralph-worktrees/{basename}/
+ *
+ * Example: /home/user/projects/my-app -> /home/user/projects/.ralph-worktrees/my-app/
+ */
+function getWorktreeBaseDir(cwd: string): string {
+  const parentDir = path.dirname(cwd);
+  const projectName = path.basename(cwd);
+  return path.join(parentDir, '.ralph-worktrees', projectName);
+}
 
 /**
  * Manages a pool of git worktrees for parallel task execution.
@@ -66,8 +82,11 @@ export class WorktreeManager {
   private readonly worktrees = new Map<string, WorktreeInfo>();
 
   constructor(config: Partial<WorktreeManagerConfig> & { cwd: string }) {
+    // Compute worktree directory as sibling of project (outside project tree)
+    // to prevent Claude CLI's project detection from using parent directory
+    const defaultWorktreeDir = getWorktreeBaseDir(config.cwd);
     this.config = {
-      worktreeDir: config.worktreeDir ?? DEFAULT_WORKTREE_DIR,
+      worktreeDir: config.worktreeDir ?? defaultWorktreeDir,
       cwd: config.cwd,
       maxWorktrees: config.maxWorktrees ?? 8,
       minFreeDiskSpace: config.minFreeDiskSpace ?? DEFAULT_MIN_FREE_DISK_SPACE,
@@ -97,11 +116,8 @@ export class WorktreeManager {
     // Sanitize task ID to create a valid git branch name
     const sanitizedTaskId = sanitizeBranchName(taskId);
     const branchName = `ralph-parallel/${sanitizedTaskId}`;
-    const worktreePath = path.resolve(
-      this.config.cwd,
-      this.config.worktreeDir,
-      worktreeId
-    );
+    // worktreeDir is now an absolute path (sibling of project), so just join
+    const worktreePath = path.join(this.config.worktreeDir, worktreeId);
 
     // Ensure parent directory exists
     await this.ensureWorktreeDir();
@@ -206,15 +222,17 @@ export class WorktreeManager {
 
     this.worktrees.clear();
 
-    // Remove the worktrees directory if empty
-    const worktreeBaseDir = path.resolve(
-      this.config.cwd,
-      this.config.worktreeDir
-    );
+    // Remove the worktrees directory if empty (worktreeDir is absolute path)
     try {
-      const entries = fs.readdirSync(worktreeBaseDir);
+      const entries = fs.readdirSync(this.config.worktreeDir);
       if (entries.length === 0) {
-        fs.rmdirSync(worktreeBaseDir);
+        fs.rmdirSync(this.config.worktreeDir);
+        // Also try to remove parent .ralph-worktrees dir if empty
+        const parentDir = path.dirname(this.config.worktreeDir);
+        const parentEntries = fs.readdirSync(parentDir);
+        if (parentEntries.length === 0) {
+          fs.rmdirSync(parentDir);
+        }
       }
     } catch {
       // Directory may not exist or not be empty
@@ -228,9 +246,47 @@ export class WorktreeManager {
   }
 
   /**
+   * Copy iteration logs from a worktree to the main project before cleanup.
+   * This preserves logs so they can be viewed on session resume.
+   */
+  private preserveIterationLogs(worktreePath: string): void {
+    const worktreeLogsDir = path.join(worktreePath, '.ralph-tui', 'iterations');
+    const mainLogsDir = path.join(this.config.cwd, '.ralph-tui', 'iterations');
+
+    // Skip if worktree has no logs
+    if (!fs.existsSync(worktreeLogsDir)) {
+      return;
+    }
+
+    try {
+      // Ensure main logs directory exists
+      fs.mkdirSync(mainLogsDir, { recursive: true });
+
+      // Copy all log files from worktree to main project
+      const logFiles = fs.readdirSync(worktreeLogsDir);
+      for (const file of logFiles) {
+        if (file.endsWith('.log')) {
+          const srcPath = path.join(worktreeLogsDir, file);
+          const destPath = path.join(mainLogsDir, file);
+
+          // Don't overwrite if destination exists (shouldn't happen, but be safe)
+          if (!fs.existsSync(destPath)) {
+            fs.copyFileSync(srcPath, destPath);
+          }
+        }
+      }
+    } catch {
+      // Best effort - don't fail cleanup if log preservation fails
+    }
+  }
+
+  /**
    * Remove a single worktree and its branch.
    */
   private async removeWorktree(info: WorktreeInfo): Promise<void> {
+    // Preserve iteration logs before deleting the worktree
+    this.preserveIterationLogs(info.path);
+
     // Force remove the worktree
     try {
       this.git(['worktree', 'remove', '--force', info.path]);
@@ -280,50 +336,13 @@ export class WorktreeManager {
   }
 
   /**
-   * Ensure the worktree base directory exists and is in .gitignore.
+   * Ensure the worktree base directory exists.
+   * Note: Since worktrees are now outside the project (sibling directory),
+   * we no longer need to add them to .gitignore.
    */
   private async ensureWorktreeDir(): Promise<void> {
-    const worktreeBaseDir = path.resolve(
-      this.config.cwd,
-      this.config.worktreeDir
-    );
-    fs.mkdirSync(worktreeBaseDir, { recursive: true });
-
-    // Ensure .ralph-tui/worktrees is in .gitignore
-    await this.ensureGitignore();
-  }
-
-  /**
-   * Add worktree directory to .gitignore if not already present.
-   */
-  private async ensureGitignore(): Promise<void> {
-    const gitignorePath = path.join(this.config.cwd, '.gitignore');
-    const worktreePattern = this.config.worktreeDir;
-
-    let content = '';
-    try {
-      content = fs.readFileSync(gitignorePath, 'utf-8');
-    } catch {
-      // .gitignore doesn't exist yet
-    }
-
-    // Check if pattern is already present
-    const lines = content.split('\n');
-    const hasPattern = lines.some(
-      (line) =>
-        line.trim() === worktreePattern ||
-        line.trim() === `/${worktreePattern}` ||
-        line.trim() === `${worktreePattern}/`
-    );
-
-    if (!hasPattern) {
-      const separator = content.endsWith('\n') || content === '' ? '' : '\n';
-      const newContent =
-        content +
-        separator +
-        `\n# Ralph TUI parallel execution worktrees\n${worktreePattern}/\n`;
-      fs.writeFileSync(gitignorePath, newContent, 'utf-8');
-    }
+    // worktreeDir is already an absolute path (sibling of project)
+    fs.mkdirSync(this.config.worktreeDir, { recursive: true });
   }
 
   /**

@@ -92,6 +92,14 @@ export interface ParallelConfig {
 
   /** Directory for git worktrees relative to project root (default: '.ralph-tui/worktrees') */
   worktreeDir?: string;
+
+  /**
+   * Merge directly to the current branch instead of creating a session branch.
+   * When false (default), a session branch `ralph-session/{shortId}` is created
+   * and all worker changes are merged there. When true, uses the legacy behavior
+   * of merging directly to the current branch.
+   */
+  directMerge?: boolean;
 }
 
 /**

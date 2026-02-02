@@ -19,6 +19,7 @@ import type {
   ParallelEventListener,
   ParallelEvent,
 } from './events.js';
+import { debugLog, logGitStatus } from './debug-log.js';
 
 /**
  * A parallel worker that executes a single task in an isolated git worktree.
@@ -39,6 +40,7 @@ export class Worker {
   private currentIteration = 0;
   private maxIterations: number;
   private lastOutput = '';
+  private lastCommitSha?: string;
   private readonly listeners: ParallelEventListener[] = [];
   private readonly engineListeners: EngineEventListener[] = [];
 
@@ -93,6 +95,17 @@ export class Worker {
       autoCommit: true,
     };
 
+    debugLog('WORKER', `Initializing worker ${this.id}`, {
+      taskId: this.config.task.id,
+      taskTitle: this.config.task.title,
+      worktreePath: this.config.worktreePath,
+      branchName: this.config.branchName,
+      engineCwd: workerConfig.cwd,
+      baseConfigCwd: baseConfig.cwd,
+      autoCommit: workerConfig.autoCommit,
+    });
+    logGitStatus('WORKER', workerConfig.cwd, `worktree at init for ${this.config.task.id}`);
+
     this.engine = new ExecutionEngine(workerConfig);
 
     // Forward engine events with worker context
@@ -143,6 +156,14 @@ export class Worker {
       const taskCompleted = engineState.tasksCompleted > 0;
 
       this.status = 'completed';
+
+      debugLog('WORKER', `Worker ${this.id} engine stopped`, {
+        taskId: this.config.task.id,
+        taskCompleted,
+        iterationsRun: engineState.currentIteration,
+        tasksCompleted: engineState.tasksCompleted,
+      });
+      logGitStatus('WORKER', this.config.worktreePath, `worktree after engine stop for ${this.config.task.id}`);
 
       const result: WorkerResult = {
         workerId: this.id,
@@ -229,6 +250,9 @@ export class Worker {
       maxIterations: this.maxIterations,
       lastOutput: this.lastOutput,
       elapsedMs: this.startTime > 0 ? Date.now() - this.startTime : 0,
+      worktreePath: this.config.worktreePath,
+      branchName: this.config.branchName,
+      commitSha: this.lastCommitSha,
     };
   }
 
@@ -275,6 +299,13 @@ export class Worker {
           stream: event.stream,
           data: event.data,
         });
+        break;
+
+      case 'task:auto-committed':
+        // Capture the commit SHA for display in the worker detail view
+        if (event.commitSha) {
+          this.lastCommitSha = event.commitSha;
+        }
         break;
     }
 

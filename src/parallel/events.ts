@@ -43,6 +43,7 @@ export type ParallelEventType =
   | 'conflict:resolved'
   // Session-level
   | 'parallel:started'
+  | 'parallel:session-branch-created'
   | 'parallel:group-started'
   | 'parallel:group-completed'
   | 'parallel:completed'
@@ -193,6 +194,20 @@ export interface ParallelStartedEvent extends EngineEventBase {
   maxWorkers: number;
 }
 
+/**
+ * Emitted when a session branch is created for parallel execution.
+ * The session branch holds all worker merges; the original branch is untouched
+ * until the user explicitly merges the session branch (via PR or direct merge).
+ */
+export interface ParallelSessionBranchCreatedEvent extends EngineEventBase {
+  type: 'parallel:session-branch-created';
+  sessionId: string;
+  /** The session branch name (e.g., "ralph-session/a4d1aae7") */
+  sessionBranch: string;
+  /** The original branch that was checked out before session branch creation */
+  originalBranch: string;
+}
+
 /** Emitted when a parallel group begins execution. */
 export interface ParallelGroupStartedEvent extends EngineEventBase {
   type: 'parallel:group-started';
@@ -259,6 +274,7 @@ export type ParallelEvent =
   | ConflictResolvedEvent
   // Session
   | ParallelStartedEvent
+  | ParallelSessionBranchCreatedEvent
   | ParallelGroupStartedEvent
   | ParallelGroupCompletedEvent
   | ParallelCompletedEvent

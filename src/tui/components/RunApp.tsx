@@ -2002,7 +2002,7 @@ export function RunApp({
           break;
       }
     },
-    [displayedTasks, selectedIndex, status, engine, onQuit, viewMode, iterations, iterationSelectedIndex, iterationHistoryLength, onIterationDrillDown, showInterruptDialog, onInterruptConfirm, onInterruptCancel, showHelp, showSettings, showQuitDialog, showEpicLoader, showRemoteManagement, onStart, storedConfig, onSaveSettings, onLoadEpics, subagentDetailLevel, onSubagentPanelVisibilityChange, currentIteration, maxIterations, renderer, detailsViewMode, subagentPanelVisible, focusedPane, navigateSubagentTree, instanceTabs, selectedTabIndex, onSelectTab, isViewingRemote, displayStatus, instanceManager, isParallelMode, parallelWorkers, parallelConflicts, showConflictPanel]
+    [displayedTasks, selectedIndex, status, engine, onQuit, viewMode, iterations, iterationSelectedIndex, iterationHistoryLength, onIterationDrillDown, showInterruptDialog, onInterruptConfirm, onInterruptCancel, showHelp, showSettings, showQuitDialog, showKillDialog, showEpicLoader, showRemoteManagement, onStart, storedConfig, onSaveSettings, onLoadEpics, subagentDetailLevel, onSubagentPanelVisibilityChange, currentIteration, maxIterations, renderer, detailsViewMode, subagentPanelVisible, focusedPane, navigateSubagentTree, instanceTabs, selectedTabIndex, onSelectTab, isViewingRemote, displayStatus, instanceManager, isParallelMode, parallelWorkers, parallelConflicts, showConflictPanel, onParallelKill]
   );
 
   useKeyboard(handleKeyboard);
@@ -2131,7 +2131,9 @@ export function RunApp({
       : selectedTask?.status;
     const isActiveTask = effectiveTaskStatus === 'active' || effectiveTaskStatus === 'in_progress';
     const isExecuting = currentTaskId === effectiveTaskId || isActiveTask;
-    if (isExecuting && currentTaskId) {
+    // Only use currentOutput if we have actual content - on session resume, currentOutput is empty
+    // but the task is marked "active", so we should fall through to historical cache lookup
+    if (isExecuting && currentTaskId && currentOutput) {
       // Use the captured start time from the iteration:started event
       const timing: IterationTimingInfo = {
         startedAt: currentIterationStartedAt,
@@ -2159,7 +2161,9 @@ export function RunApp({
 
     // Check historical output cache (loaded from disk)
     const historicalData = historicalOutputCache.get(effectiveTaskId);
-    if (historicalData !== undefined) {
+    // Only use historical data if it has actual output content
+    // Empty output ('') means no logs were found - treat as "not yet executed"
+    if (historicalData !== undefined && historicalData.output) {
       return {
         iteration: -1, // Historical iteration number unknown, use -1 to indicate "past"
         output: historicalData.output,
@@ -2347,16 +2351,16 @@ export function RunApp({
     return { agent: displayAgentName, model: currentModel };
   }, [effectiveTaskId, selectedIteration, currentTaskId, displayAgentName, currentModel, historicalOutputCache]);
 
-  // Load historical iteration logs from disk when a completed task is selected
-  // or when viewing iterations history
+  // Load historical iteration logs from disk when a task is selected.
+  // This populates the cache so output is available even on session resume
+  // when currentOutput is empty but the task appears "active".
   useEffect(() => {
     if (!cwd || !effectiveTaskId) return;
 
-    // Check if we should load historical data
-    // Don't load for running iterations or active tasks
+    // Don't load for actively running iterations (they're streaming live output)
+    // But DO load for active tasks - they may have resumed and need historical data as fallback
     const isRunning = selectedIteration?.status === 'running';
-    const isActiveTask = selectedTask?.status === 'active';
-    if (isRunning || isActiveTask) return;
+    if (isRunning) return;
 
     // Check if already in cache
     const hasInCache = historicalOutputCache.has(effectiveTaskId);
@@ -2392,6 +2396,13 @@ export function RunApp({
             return next;
           });
         }
+      }).catch(() => {
+        // On error, mark as empty to avoid repeated failed lookups
+        setHistoricalOutputCache((prev) => {
+          const next = new Map(prev);
+          next.set(taskId, { output: '', timing: {} });
+          return next;
+        });
       });
     }
   }, [effectiveTaskId, selectedTask, selectedIteration, cwd, historicalOutputCache]);

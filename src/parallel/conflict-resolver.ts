@@ -18,6 +18,10 @@ function validateGitRef(ref: string, context: string): void {
   if (!ref || ref.trim() === '') {
     throw new Error(`Invalid git ref for ${context}: ref is empty`);
   }
+  // Cannot contain spaces
+  if (ref.includes(' ')) {
+    throw new Error(`Invalid git ref for ${context}: contains spaces`);
+  }
   // Cannot contain double dots
   if (ref.includes('..')) {
     throw new Error(`Invalid git ref for ${context}: contains '..'`);

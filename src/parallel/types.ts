@@ -102,6 +102,15 @@ export interface WorkerDisplayState {
 
   /** Elapsed time in milliseconds since worker started */
   elapsedMs: number;
+
+  /** Path to the git worktree (for display in detail view) */
+  worktreePath?: string;
+
+  /** Git branch name (e.g., "ralph-parallel/TASK-001") */
+  branchName?: string;
+
+  /** Latest commit SHA on this worker's branch (short form) */
+  commitSha?: string;
 }
 
 // ─── Worktree Types ────────────────────────────────────────────────────────────
@@ -306,6 +315,14 @@ export interface ParallelExecutorConfig {
 
   /** Maximum times a task can be re-queued after conflict (default: 1) */
   maxRequeueCount: number;
+
+  /**
+   * Merge directly to the current branch instead of creating a session branch.
+   * When false (default), a session branch `ralph-session/{shortId}` is created
+   * and all worker changes are merged there. When true, uses the legacy behavior
+   * of merging directly to the current branch.
+   */
+  directMerge?: boolean;
 }
 
 /**
@@ -400,6 +417,21 @@ export interface ParallelSessionState {
 
   /** Timestamp of the last state update (ISO 8601) */
   lastUpdatedAt: string;
+
+  /**
+   * Session branch name (e.g., "ralph-session/a4d1aae7").
+   * All worker changes are merged to this branch. After completion,
+   * the user can merge this to main via PR or direct merge.
+   * Only set when directMerge is false (the default).
+   */
+  sessionBranch?: string;
+
+  /**
+   * Original branch name that was checked out when the session started.
+   * Used to return to this branch after parallel execution completes.
+   * Only set when directMerge is false (the default).
+   */
+  originalBranch?: string;
 }
 
 // ─── Task Graph Types ──────────────────────────────────────────────────────────

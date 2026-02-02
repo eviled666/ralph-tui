@@ -26,6 +26,14 @@ import type {
   ParallelEvent,
   ParallelEventListener,
 } from './events.js';
+import {
+  initDebugLog,
+  debugLog,
+  logGitStatus,
+  logWorktreeInfo,
+  logBranchCommits,
+  closeDebugLog,
+} from './debug-log.js';
 
 /** Default parallel executor configuration */
 const DEFAULT_PARALLEL_CONFIG: ParallelExecutorConfig = {
@@ -171,6 +179,15 @@ export class ParallelExecutor {
     this.startedAt = new Date().toISOString();
     this.status = 'analyzing';
 
+    // Initialize debug logging
+    initDebugLog(this.config.cwd);
+    debugLog('EXECUTOR', 'Parallel execution started', {
+      cwd: this.config.cwd,
+      maxWorkers: this.config.maxWorkers,
+      sessionId: this.sessionId,
+    });
+    logGitStatus('EXECUTOR', this.config.cwd, 'main repo at start');
+
     try {
       // Fetch all tasks from the tracker
       const tasks = await this.tracker.getTasks({
@@ -191,7 +208,21 @@ export class ParallelExecutor {
         return;
       }
 
-      // Create session backup
+      // Initialize session branch unless directMerge is enabled.
+      // The session branch holds all worker merges, keeping the original branch clean.
+      if (!this.config.directMerge) {
+        const { branch, original } = this.mergeEngine.initializeSessionBranch(this.sessionId);
+
+        this.emitParallel({
+          type: 'parallel:session-branch-created',
+          timestamp: new Date().toISOString(),
+          sessionId: this.sessionId,
+          sessionBranch: branch,
+          originalBranch: original,
+        });
+      }
+
+      // Create session backup (on the session branch if one was created)
       this.mergeEngine.createSessionBackup(this.sessionId);
 
       this.emitParallel({
@@ -300,6 +331,22 @@ export class ParallelExecutor {
   }
 
   /**
+   * Get the session branch name (e.g., "ralph-session/a4d1aae7").
+   * @returns Session branch name, or null if using directMerge mode
+   */
+  getSessionBranch(): string | null {
+    return this.mergeEngine.getSessionBranch();
+  }
+
+  /**
+   * Get the original branch name before session branch was created.
+   * @returns Original branch name, or null if using directMerge mode
+   */
+  getOriginalBranch(): string | null {
+    return this.mergeEngine.getOriginalBranch();
+  }
+
+  /**
    * Get display states for all active workers.
    */
   getWorkerStates(): WorkerDisplayState[] {
@@ -332,6 +379,13 @@ export class ParallelExecutor {
     let groupMergesCompleted = 0;
     let groupMergesFailed = 0;
 
+    debugLog('GROUP', `Starting group ${groupIndex}`, {
+      taskCount: group.tasks.length,
+      batchCount: batches.length,
+      taskIds: group.tasks.map((t) => t.id),
+    });
+    logWorktreeInfo('GROUP', this.config.cwd);
+
     for (const batch of batches) {
       if (this.shouldStop) break;
 
@@ -347,9 +401,24 @@ export class ParallelExecutor {
           groupTasksCompleted++;
           this.totalTasksCompleted++;
 
+          debugLog('MERGE', `Worker completed task ${result.task.id}`, {
+            taskCompleted: result.taskCompleted,
+            iterationsRun: result.iterationsRun,
+            branchName: result.branchName,
+            worktreePath: result.worktreePath,
+          });
+          logBranchCommits('MERGE', this.config.cwd, result.branchName);
+
           // Enqueue and process merge first, only mark complete on successful merge
           this.mergeEngine.enqueue(result);
           const mergeResult = await this.mergeEngine.processNext();
+
+          debugLog('MERGE', `Merge result for ${result.task.id}`, {
+            success: mergeResult?.success,
+            strategy: mergeResult?.strategy,
+            filesChanged: mergeResult?.filesChanged,
+            error: mergeResult?.error,
+          });
 
           if (mergeResult?.success) {
             // Merge succeeded - now mark task as complete in tracker
@@ -467,6 +536,13 @@ export class ParallelExecutor {
       await worker.initialize(this.baseConfig, this.tracker);
       this.activeWorkers.push(worker);
 
+      debugLog('BATCH', `Created worker ${workerId} for task ${task.id}`, {
+        worktreePath: worktreeInfo.path,
+        branchName: worktreeInfo.branch,
+        taskTitle: task.title,
+      });
+      logGitStatus('BATCH', worktreeInfo.path, `worktree for ${task.id}`);
+
       // Mark task as in_progress in the tracker
       try {
         await this.tracker.updateTaskStatus(task.id, 'in_progress');
@@ -476,8 +552,19 @@ export class ParallelExecutor {
     }
 
     // Start all workers in parallel
+    debugLog('BATCH', 'Starting all workers', {
+      workerCount: this.activeWorkers.length,
+      workerIds: this.activeWorkers.map((w) => w.id),
+    });
     const workerPromises = this.activeWorkers.map((w) => w.start());
     const results = await Promise.allSettled(workerPromises);
+
+    // Log status of each worktree after workers complete
+    for (const worker of this.activeWorkers) {
+      const workerConfig = worker.config;
+      logGitStatus('BATCH', workerConfig.worktreePath, `worktree after ${workerConfig.task.id} completed`);
+      logBranchCommits('BATCH', this.config.cwd, workerConfig.branchName);
+    }
 
     // Collect results
     const workerResults: WorkerResult[] = results.map((result, i) => {
@@ -504,7 +591,7 @@ export class ParallelExecutor {
 
     // Release worktrees
     for (const worker of this.activeWorkers) {
-      this.worktreeManager.release(`worker-${worker.id}`);
+      this.worktreeManager.release(worker.id);
     }
 
     this.completedResults.push(...workerResults);
@@ -546,6 +633,9 @@ export class ParallelExecutor {
    * Clean up all resources.
    */
   private async cleanup(): Promise<void> {
+    debugLog('CLEANUP', 'Starting cleanup');
+    logGitStatus('CLEANUP', this.config.cwd, 'main repo at cleanup');
+
     try {
       await this.worktreeManager.cleanupAll();
     } catch {
@@ -557,6 +647,19 @@ export class ParallelExecutor {
     } catch {
       // Best effort cleanup
     }
+
+    // Return to original branch if a session branch was created.
+    // This leaves the session branch with all merged changes, but the user
+    // is back on their original branch ready for next steps.
+    if (!this.config.directMerge) {
+      try {
+        this.mergeEngine.returnToOriginalBranch();
+      } catch {
+        // Best effort — user may need to checkout manually
+      }
+    }
+
+    closeDebugLog();
   }
 
   /**

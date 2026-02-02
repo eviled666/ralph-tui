@@ -6,11 +6,24 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import type { ParallelSessionState, TaskGraphAnalysis } from './types.js';
 
 /** File name for persisted parallel session state */
 const SESSION_FILE = '.ralph-tui/parallel-session.json';
+
+/**
+ * Options for creating a parallel session.
+ */
+export interface CreateParallelSessionOptions {
+  sessionId: string;
+  taskGraph: TaskGraphAnalysis;
+  sessionStartTag: string;
+  /** Session branch name (e.g., "ralph-session/a4d1aae7") */
+  sessionBranch?: string;
+  /** Original branch before session branch was created */
+  originalBranch?: string;
+}
 
 /**
  * Create a new parallel session state.
@@ -18,7 +31,8 @@ const SESSION_FILE = '.ralph-tui/parallel-session.json';
 export function createParallelSession(
   sessionId: string,
   taskGraph: TaskGraphAnalysis,
-  sessionStartTag: string
+  sessionStartTag: string,
+  options?: { sessionBranch?: string; originalBranch?: string }
 ): ParallelSessionState {
   const now = new Date().toISOString();
   return {
@@ -31,6 +45,8 @@ export function createParallelSession(
     sessionStartTag,
     startedAt: now,
     lastUpdatedAt: now,
+    sessionBranch: options?.sessionBranch,
+    originalBranch: options?.originalBranch,
   };
 }
 
@@ -94,6 +110,23 @@ export async function deleteParallelSession(cwd: string): Promise<void> {
 export async function hasParallelSession(cwd: string): Promise<boolean> {
   const filePath = path.join(cwd, SESSION_FILE);
   return fs.existsSync(filePath);
+}
+
+/**
+ * Update session state with session branch information.
+ * Called when a session branch is created for parallel execution.
+ */
+export function updateSessionWithBranch(
+  state: ParallelSessionState,
+  sessionBranch: string,
+  originalBranch: string
+): ParallelSessionState {
+  return {
+    ...state,
+    sessionBranch,
+    originalBranch,
+    lastUpdatedAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -168,8 +201,8 @@ export function cleanupOrphanedWorktrees(
 
   for (const worktreePath of orphans) {
     try {
-      // Try git worktree remove first
-      execSync(`git -C "${cwd}" worktree remove --force "${worktreePath}"`, {
+      // Try git worktree remove first (use execFileSync to prevent command injection)
+      execFileSync('git', ['-C', cwd, 'worktree', 'remove', '--force', worktreePath], {
         encoding: 'utf-8',
         timeout: 10000,
       });
@@ -178,7 +211,7 @@ export function cleanupOrphanedWorktrees(
       // Manual cleanup fallback
       try {
         fs.rmSync(worktreePath, { recursive: true, force: true });
-        execSync(`git -C "${cwd}" worktree prune`, {
+        execFileSync('git', ['-C', cwd, 'worktree', 'prune'], {
           encoding: 'utf-8',
           timeout: 10000,
         });
@@ -191,15 +224,16 @@ export function cleanupOrphanedWorktrees(
 
   // Clean up ralph-parallel/* branches
   try {
-    const branches = execSync(
-      `git -C "${cwd}" branch --list "ralph-parallel/*"`,
+    const branches = execFileSync(
+      'git',
+      ['-C', cwd, 'branch', '--list', 'ralph-parallel/*'],
       { encoding: 'utf-8', timeout: 10000 }
     );
     for (const branch of branches.split('\n')) {
       const name = branch.trim().replace(/^\*\s*/, '');
       if (name) {
         try {
-          execSync(`git -C "${cwd}" branch -D "${name}"`, {
+          execFileSync('git', ['-C', cwd, 'branch', '-D', name], {
             encoding: 'utf-8',
             timeout: 10000,
           });

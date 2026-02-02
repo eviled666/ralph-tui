@@ -143,6 +143,8 @@ interface ExtendedRuntimeOptions extends RuntimeOptions {
   listenPort?: number;
   /** Rotate server token before starting listener */
   rotateToken?: boolean;
+  /** Merge directly to current branch instead of creating session branch (parallel mode) */
+  directMerge?: boolean;
 }
 
 /**
@@ -358,6 +360,10 @@ export function parseRunArgs(args: string[]): ExtendedRuntimeOptions {
         }
         break;
       }
+
+      case '--direct-merge':
+        options.directMerge = true;
+        break;
     }
   }
 
@@ -403,6 +409,7 @@ Options:
   --serial            Force sequential execution (skip parallel analysis)
   --sequential        Alias for --serial
   --parallel [N]      Force parallel execution with optional max workers (default: 3)
+  --direct-merge      Merge directly to current branch (skip session branch creation)
   --listen            Enable remote listener (implies --headless)
   --listen-port <n>   Port for remote listener (default: 7890)
   --rotate-token      Rotate server token before starting listener
@@ -1366,6 +1373,10 @@ async function runParallelWithTui(
     autoCommitSkippedTaskIds: new Set<string>(),
     /** Task IDs that have been successfully merged (shows ✓ done in TUI) */
     mergedTaskIds: new Set<string>(),
+    /** Session branch name (e.g., "ralph-session/a4d1aae7") */
+    sessionBranch: null as string | null,
+    /** Original branch before session branch was created */
+    originalBranch: null as string | null,
   };
 
   // Render trigger — forces React to re-render with updated parallel state.
@@ -1386,6 +1397,14 @@ async function runParallelWithTui(
     switch (event.type) {
       case 'parallel:started':
         parallelState.totalGroups = event.totalGroups;
+        break;
+
+      case 'parallel:session-branch-created':
+        // Track session branch info in local state and persisted session
+        parallelState.sessionBranch = event.sessionBranch;
+        parallelState.originalBranch = event.originalBranch;
+        // Note: Session state is managed by the caller; branch info will be
+        // retrieved from parallelExecutor after completion
         break;
 
       case 'parallel:group-started':
@@ -2519,16 +2538,27 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         ? options.parallel
         : storedConfig?.parallel?.maxWorkers ?? 3;
 
+      // Resolve directMerge: CLI flag takes precedence over config
+      const directMerge = options.directMerge ?? storedConfig?.parallel?.directMerge ?? false;
+
       const parallelExecutor = new ParallelExecutor(config, tracker, {
         maxWorkers,
         worktreeDir: storedConfig?.parallel?.worktreeDir,
+        directMerge,
       });
+
+      // Track session branch info for completion guidance
+      let sessionBranchForGuidance: string | null = null;
+      let originalBranchForGuidance: string | null = null;
 
       if (config.showTui) {
         // Parallel TUI mode — visualize workers, merges, and conflicts
         persistedState = await runParallelWithTui(
           parallelExecutor, persistedState, config, tasks, storedConfig
         );
+        // Get branch info after execution completes
+        sessionBranchForGuidance = parallelExecutor.getSessionBranch();
+        originalBranchForGuidance = parallelExecutor.getOriginalBranch();
       } else {
         // Parallel headless mode — log events to console
         parallelExecutor.on((event) => {
@@ -2536,6 +2566,9 @@ export async function executeRunCommand(args: string[]): Promise<void> {
           switch (event.type) {
             case 'parallel:started':
               console.log(`[${time}] [INFO] [parallel] Parallel execution started: ${event.totalTasks} tasks, ${event.totalGroups} groups, ${event.maxWorkers} workers`);
+              break;
+            case 'parallel:session-branch-created':
+              console.log(`[${time}] [INFO] [parallel] Session branch created: ${event.sessionBranch} (from ${event.originalBranch})`);
               break;
             case 'parallel:group-started':
               console.log(`[${time}] [INFO] [parallel] Group ${event.groupIndex + 1}/${event.totalGroups} started: ${event.workerCount} workers`);
@@ -2606,11 +2639,40 @@ export async function executeRunCommand(args: string[]): Promise<void> {
 
         try {
           await parallelExecutor.execute();
+          // Get branch info after execution completes
+          sessionBranchForGuidance = parallelExecutor.getSessionBranch();
+          originalBranchForGuidance = parallelExecutor.getOriginalBranch();
         } finally {
           // Remove handlers after execution completes
           process.removeListener('SIGINT', handleParallelSignal);
           process.removeListener('SIGTERM', handleParallelSignal);
         }
+      }
+
+      // Show completion guidance if a session branch was created
+      if (sessionBranchForGuidance && originalBranchForGuidance) {
+        console.log('');
+        console.log('═══════════════════════════════════════════════════════════════');
+        console.log('                   Session Complete!                            ');
+        console.log('═══════════════════════════════════════════════════════════════');
+        console.log('');
+        console.log(`  Changes are on branch: ${sessionBranchForGuidance}`);
+        console.log(`  You are now on branch: ${originalBranchForGuidance}`);
+        console.log('');
+        console.log('  Next steps:');
+        console.log('');
+        console.log(`    To merge to ${originalBranchForGuidance}:`);
+        console.log(`      git merge ${sessionBranchForGuidance}`);
+        console.log('');
+        console.log('    To create a PR:');
+        console.log(`      git push -u origin ${sessionBranchForGuidance}`);
+        console.log(`      gh pr create --head ${sessionBranchForGuidance}`);
+        console.log('');
+        console.log('    To discard all changes:');
+        console.log(`      git branch -D ${sessionBranchForGuidance}`);
+        console.log('');
+        console.log('═══════════════════════════════════════════════════════════════');
+        console.log('');
       }
     } else if (config.showTui) {
       // Sequential TUI mode (existing path)

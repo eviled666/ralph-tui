@@ -47,8 +47,9 @@ git branch -D ralph-parallel/task-456
 # List all parallel branches
 git branch --list 'ralph-parallel/*'
 
-# Delete all parallel branches
-git branch -D $(git branch --list 'ralph-parallel/*' | tr -d ' ')
+# Delete all parallel branches (handles empty list gracefully)
+git for-each-ref --format='%(refname:short)' refs/heads/ralph-parallel/ | \
+  while read -r branch; do git branch -D "$branch"; done
 ```
 
 ## Merge Failures
@@ -133,8 +134,8 @@ git tag --list 'ralph/*'
 # Delete a specific tag
 git tag -d ralph/pre-merge/task-123/1706000000
 
-# Delete all ralph tags
-git tag --list 'ralph/*' | xargs git tag -d
+# Delete all ralph tags (handles empty list gracefully)
+git tag --list 'ralph/*' | while read -r tag; do git tag -d "$tag"; done
 ```
 
 ## FAQ

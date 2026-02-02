@@ -17,6 +17,10 @@ function validateGitRef(ref: string, context: string): void {
   if (!ref || ref.trim() === '') {
     throw new Error(`Invalid git ref for ${context}: ref is empty`);
   }
+  // Cannot contain spaces
+  if (ref.includes(' ')) {
+    throw new Error(`Invalid git ref for ${context}: contains spaces`);
+  }
   // Cannot contain double dots
   if (ref.includes('..')) {
     throw new Error(`Invalid git ref for ${context}: contains '..'`);
@@ -61,6 +65,7 @@ import type {
   ParallelEventListener,
   ParallelEvent,
 } from './events.js';
+import { debugLog, logBranchCommits } from './debug-log.js';
 
 /**
  * Sequential merge queue that processes completed worker branches.
@@ -79,6 +84,12 @@ export class MergeEngine {
   private processing = false;
   private sessionStartTag: string | null = null;
   private readonly listeners: ParallelEventListener[] = [];
+
+  /** Session branch name (e.g., "ralph-session/a4d1aae7") */
+  private sessionBranch: string | null = null;
+
+  /** Original branch name before session branch was created */
+  private originalBranch: string | null = null;
 
   constructor(cwd: string) {
     this.cwd = cwd;
@@ -113,6 +124,102 @@ export class MergeEngine {
    */
   getSessionStartTag(): string | null {
     return this.sessionStartTag;
+  }
+
+  /**
+   * Initialize a session branch for parallel execution.
+   *
+   * Creates a new branch `ralph-session/{shortId}` from the current HEAD.
+   * All worker changes will be merged to this branch instead of the original branch.
+   * This enables safer parallel workflows: the session branch can be merged via PR,
+   * or discarded entirely by deleting the branch.
+   *
+   * @param sessionId - Full session ID (will be truncated to first 8 chars)
+   * @returns Object with the session branch name and original branch name
+   */
+  initializeSessionBranch(sessionId: string): { branch: string; original: string } {
+    // Get current branch name
+    const currentBranch = this.git(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    this.originalBranch = currentBranch;
+
+    // Create session branch name from first 8 chars of session ID
+    const shortId = sessionId.replace(/^parallel-/, '').slice(0, 8);
+    let branchName = `ralph-session/${shortId}`;
+
+    // Handle collision by appending counter suffix
+    let counter = 1;
+    while (this.branchExists(branchName)) {
+      counter++;
+      branchName = `ralph-session/${shortId}-${counter}`;
+    }
+
+    validateGitRef(branchName, 'sessionBranch');
+
+    // Create and checkout the session branch
+    this.git(['checkout', '-b', branchName]);
+    this.sessionBranch = branchName;
+
+    debugLog('MERGE-ENGINE', 'Created session branch', {
+      sessionBranch: branchName,
+      originalBranch: currentBranch,
+      sessionId,
+    });
+
+    return { branch: branchName, original: currentBranch };
+  }
+
+  /**
+   * Get the session branch name.
+   * @returns Session branch name, or null if not using session branches
+   */
+  getSessionBranch(): string | null {
+    return this.sessionBranch;
+  }
+
+  /**
+   * Get the original branch name before session branch was created.
+   * @returns Original branch name, or null if not using session branches
+   */
+  getOriginalBranch(): string | null {
+    return this.originalBranch;
+  }
+
+  /**
+   * Return to the original branch after parallel execution completes.
+   * Does nothing if no session branch was created (directMerge mode).
+   */
+  returnToOriginalBranch(): void {
+    if (!this.originalBranch) {
+      return;
+    }
+
+    try {
+      validateGitRef(this.originalBranch, 'originalBranch');
+      this.git(['checkout', this.originalBranch]);
+
+      debugLog('MERGE-ENGINE', 'Returned to original branch', {
+        originalBranch: this.originalBranch,
+        sessionBranch: this.sessionBranch,
+      });
+    } catch (err) {
+      debugLog('MERGE-ENGINE', 'Failed to return to original branch', {
+        originalBranch: this.originalBranch,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      // Don't throw — best effort to return to original branch
+    }
+  }
+
+  /**
+   * Check if a branch exists in the repository.
+   */
+  private branchExists(branchName: string): boolean {
+    try {
+      this.git(['rev-parse', '--verify', `refs/heads/${branchName}`]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -269,6 +376,13 @@ export class MergeEngine {
     operation.startedAt = new Date().toISOString();
     this.updateStatus(operation, 'in-progress');
 
+    debugLog('MERGE-ENGINE', `Starting merge for ${taskId}`, {
+      taskId,
+      operationId: operation.id,
+      sourceBranch: operation.sourceBranch,
+      worktreePath: operation.workerResult.worktreePath,
+    });
+
     this.emit({
       type: 'merge:started',
       timestamp: operation.startedAt,
@@ -279,6 +393,10 @@ export class MergeEngine {
 
     // Pre-flight: verify branch has commits
     if (!this.branchHasCommits(operation.sourceBranch)) {
+      debugLog('MERGE-ENGINE', `FAILING merge - no commits for ${taskId}`, {
+        taskId,
+        sourceBranch: operation.sourceBranch,
+      });
       const result = this.failMerge(
         operation,
         'No commits to merge. The agent may have completed the task but created no committable files. ' +
@@ -487,8 +605,24 @@ export class MergeEngine {
     try {
       validateGitRef(branchName, 'branchName');
       const output = this.git(['rev-list', '--count', `HEAD..${branchName}`]);
-      return parseInt(output.trim(), 10) > 0;
-    } catch {
+      const count = parseInt(output.trim(), 10);
+      const hasCommits = count > 0;
+
+      debugLog('MERGE-ENGINE', `branchHasCommits check for ${branchName}`, {
+        branchName,
+        commitsAhead: count,
+        hasCommits,
+        cwd: this.cwd,
+      });
+      logBranchCommits('MERGE-ENGINE', this.cwd, branchName);
+
+      return hasCommits;
+    } catch (err) {
+      debugLog('MERGE-ENGINE', `branchHasCommits FAILED for ${branchName}`, {
+        branchName,
+        error: err instanceof Error ? err.message : String(err),
+        cwd: this.cwd,
+      });
       return false;
     }
   }

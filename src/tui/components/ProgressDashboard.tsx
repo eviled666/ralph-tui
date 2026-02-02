@@ -213,7 +213,7 @@ export function ProgressDashboard({
         )}
 
         {/* Parallel worker count - shown when workers are active */}
-        {activeWorkerCount != null && activeWorkerCount > 0 && (
+        {activeWorkerCount != null && activeWorkerCount > 0 && totalWorkerCount != null && (
           <box style={{ flexDirection: 'row' }}>
             <text fg={colors.status.info}>Workers: </text>
             <text fg={colors.status.success}>{activeWorkerCount} active</text>

@@ -234,6 +234,7 @@ export type EngineEventType =
   | 'conflict:ai-failed'
   | 'conflict:resolved'
   | 'parallel:started'
+  | 'parallel:session-branch-created'
   | 'parallel:group-started'
   | 'parallel:group-completed'
   | 'parallel:completed'

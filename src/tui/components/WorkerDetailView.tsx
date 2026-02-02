@@ -57,8 +57,10 @@ export const WorkerDetailView = memo(function WorkerDetailView({
     ? formatElapsedTime(Math.floor(worker.elapsedMs / 1000))
     : '0s';
 
-  // Reserve lines for header info
-  const headerLines = 5;
+  // Reserve lines for header info (title, task, progress/git, worktree path, separator)
+  // With worktreePath: title(1) + task(1) + progress(1) + worktree(1) + separator(1) = 5
+  // Without worktreePath: title(1) + task(1) + progress(1) + separator(1) = 4
+  const headerLines = worker.worktreePath ? 5 : 4;
   const outputHeight = Math.max(1, maxHeight - headerLines);
 
   // Take the last N output lines that fit
@@ -81,10 +83,33 @@ export const WorkerDetailView = memo(function WorkerDetailView({
         <span fg={colors.fg.primary}>{worker.task.title}</span>
       </text>
 
-      {/* Progress */}
-      <text fg={colors.fg.muted}>
-        Iteration {worker.currentIteration}/{worker.maxIterations}
+      {/* Progress and git info */}
+      <text>
+        <span fg={colors.fg.muted}>Iteration </span>
+        <span fg={colors.fg.secondary}>{worker.currentIteration}/{worker.maxIterations}</span>
+        {worker.branchName && (
+          <>
+            <span fg={colors.fg.dim}> │ </span>
+            <span fg={colors.fg.muted}>Branch: </span>
+            <span fg={colors.accent.secondary}>{worker.branchName}</span>
+          </>
+        )}
+        {worker.commitSha && (
+          <>
+            <span fg={colors.fg.dim}> │ </span>
+            <span fg={colors.fg.muted}>Commit: </span>
+            <span fg={colors.status.success}>{worker.commitSha}</span>
+          </>
+        )}
       </text>
+
+      {/* Worktree path */}
+      {worker.worktreePath && (
+        <text>
+          <span fg={colors.fg.muted}>Worktree: </span>
+          <span fg={colors.fg.dim}>{worker.worktreePath}</span>
+        </text>
+      )}
 
       {/* Separator */}
       <text fg={colors.border.muted}>{'─'.repeat(Math.min(maxWidth, 60))}</text>
