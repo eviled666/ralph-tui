@@ -112,6 +112,47 @@ describe('BeadsTrackerPlugin', () => {
     return plugin;
   }
 
+  describe('getTasks', () => {
+    test('uses --limit 0 to bypass default 50 result limit', async () => {
+      // The --limit 0 flag is critical to bypass bd's default limit of 50 results.
+      // Without it, epics with more than 50 tasks would have tasks truncated.
+      // See: https://github.com/subsy/ralph-tui/issues/233
+      mockSpawnStdout = '[]';
+      mockSpawnExitCode = 0;
+
+      const plugin = await createPlugin();
+      mockSpawnArgs = []; // Reset after initialize
+      await plugin.getTasks();
+
+      expect(mockSpawnArgs.length).toBeGreaterThanOrEqual(1);
+      const listCall = mockSpawnArgs.find((args) => args.includes('list'));
+      expect(listCall).toBeDefined();
+      expect(listCall).toContain('--limit');
+      expect(listCall).toContain('0');
+    });
+  });
+
+  describe('getEpics', () => {
+    test('uses --limit 0 to bypass default 50 result limit', async () => {
+      // The --limit 0 flag is critical to bypass bd's default limit of 50 results.
+      // See: https://github.com/subsy/ralph-tui/issues/233
+      mockSpawnStdout = '[]';
+      mockSpawnExitCode = 0;
+
+      const plugin = await createPlugin();
+      mockSpawnArgs = []; // Reset after initialize
+      await plugin.getEpics();
+
+      expect(mockSpawnArgs.length).toBeGreaterThanOrEqual(1);
+      const listCall = mockSpawnArgs.find((args) => args.includes('list'));
+      expect(listCall).toBeDefined();
+      expect(listCall).toContain('--type');
+      expect(listCall).toContain('epic');
+      expect(listCall).toContain('--limit');
+      expect(listCall).toContain('0');
+    });
+  });
+
   describe('completeTask', () => {
     test('uses bd close command with --force flag', async () => {
       // Return valid array format for both close (ignored) and getTask calls
