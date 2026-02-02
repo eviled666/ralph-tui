@@ -867,12 +867,16 @@ export abstract class BaseAgentPlugin implements AgentPlugin {
 
       // Run a minimal test prompt
       const testPrompt = 'Respond with exactly: PREFLIGHT_OK';
-      let output = '';
+      let stdoutCapture = '';
+      let stderrCapture = '';
 
       const handle = this.execute(testPrompt, [], {
         timeout,
         onStdout: (data: string) => {
-          output += data;
+          stdoutCapture += data;
+        },
+        onStderr: (data: string) => {
+          stderrCapture += data;
         },
       });
 
@@ -880,36 +884,60 @@ export abstract class BaseAgentPlugin implements AgentPlugin {
       const durationMs = Date.now() - startTime;
 
       // Check if we got any meaningful response
-      if (result.status === 'completed' && output.length > 0) {
+      if (result.status === 'completed' && stdoutCapture.length > 0) {
         return {
           success: true,
           durationMs,
+          stdout: stdoutCapture,
         };
       }
+
+      // Build detailed error message for failures
+      const buildErrorDetails = (baseError: string): string => {
+        const details: string[] = [baseError];
+        if (result.exitCode !== undefined && result.exitCode !== 0) {
+          details.push(`exit code ${result.exitCode}`);
+        }
+        if (stderrCapture.trim()) {
+          // Truncate stderr if too long, but include first meaningful part
+          const truncatedStderr = stderrCapture.trim().slice(0, 500);
+          details.push(`stderr: ${truncatedStderr}`);
+        }
+        return details.join(' - ');
+      };
 
       if (result.status === 'timeout') {
         return {
           success: false,
-          error: 'Agent timed out without responding',
+          error: buildErrorDetails('Agent timed out without responding'),
           suggestion: this.getPreflightSuggestion(),
           durationMs,
+          exitCode: result.exitCode,
+          stderr: stderrCapture,
+          stdout: stdoutCapture,
         };
       }
 
       if (result.status === 'failed') {
         return {
           success: false,
-          error: result.error ?? 'Agent execution failed',
+          error: buildErrorDetails(result.error ?? 'Agent execution failed'),
           suggestion: this.getPreflightSuggestion(),
           durationMs,
+          exitCode: result.exitCode,
+          stderr: stderrCapture,
+          stdout: stdoutCapture,
         };
       }
 
       return {
         success: false,
-        error: 'Agent did not produce any output',
+        error: buildErrorDetails('Agent did not produce any output'),
         suggestion: this.getPreflightSuggestion(),
         durationMs,
+        exitCode: result.exitCode,
+        stderr: stderrCapture,
+        stdout: stdoutCapture,
       };
     } catch (error) {
       return {

@@ -40,6 +40,15 @@ export interface AgentPreflightResult {
 
   /** How long the preflight check took in milliseconds */
   durationMs?: number;
+
+  /** Exit code from the preflight execution (for diagnostics) */
+  exitCode?: number;
+
+  /** Stderr output from the preflight execution (for diagnostics) */
+  stderr?: string;
+
+  /** Stdout output from the preflight execution (for diagnostics) */
+  stdout?: string;
 }
 
 /**
