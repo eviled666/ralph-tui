@@ -357,7 +357,7 @@ export class BeadsTrackerPlugin extends BaseTrackerPlugin {
   async getTasks(filter?: TaskFilter): Promise<TrackerTask[]> {
     // Build bd list command args
     // Use --all to include closed issues (TUI filters visibility via showClosedTasks state)
-    const args = ['list', '--json', '--all'];
+    const args = ['list', '--json', '--all', '--limit', '0'];
 
     // Filter by parent (epic) - beads in an epic are children of the epic issue
     if (filter?.parentId) {
@@ -533,7 +533,7 @@ export class BeadsTrackerPlugin extends BaseTrackerPlugin {
    */
   override async getEpics(): Promise<TrackerTask[]> {
     // Query for epics using bd list with type filter
-    const args = ['list', '--json', '--type', 'epic'];
+    const args = ['list', '--json', '--type', 'epic', '--limit', '0'];
 
     // Filter by labels if configured
     if (this.labels.length > 0) {
@@ -750,7 +750,7 @@ When finished, signal completion with:
 
       // Get completion stats from epic children
       const childrenResult = await execBd(
-        ['list', '--json', '--parent', epicId],
+        ['list', '--json', '--parent', epicId, '--limit', '0'],
         this.workingDir
       );
 
