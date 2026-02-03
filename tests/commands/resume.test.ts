@@ -16,6 +16,53 @@ import {
 import type { SessionRegistryEntry } from '../../src/session/registry.js';
 import * as sessionModule from '../../src/session/index.js';
 
+/**
+ * Tests for tracker validation logic.
+ * Regression tests for https://github.com/subsy/ralph-tui/issues/247
+ *
+ * When resuming a session, if the tracker returns no tasks but the session
+ * has task history, we should warn the user about the mismatch.
+ */
+describe('tracker validation logic (issue #247)', () => {
+  // Helper that mirrors the validation logic in resume.tsx
+  const shouldWarnAboutTrackerMismatch = (
+    engineTotalTasks: number,
+    sessionTotalTasks: number
+  ): boolean => {
+    return engineTotalTasks === 0 && sessionTotalTasks > 0;
+  };
+
+  test('returns true when engine has 0 tasks but session has 130', () => {
+    // This was the user's scenario - session showed 108/130 but tracker returned nothing
+    expect(shouldWarnAboutTrackerMismatch(0, 130)).toBe(true);
+  });
+
+  test('returns true when engine has 0 tasks but session has 1', () => {
+    expect(shouldWarnAboutTrackerMismatch(0, 1)).toBe(true);
+  });
+
+  test('returns false when both have 0 tasks (fresh session)', () => {
+    expect(shouldWarnAboutTrackerMismatch(0, 0)).toBe(false);
+  });
+
+  test('returns false when engine has tasks matching session', () => {
+    expect(shouldWarnAboutTrackerMismatch(130, 130)).toBe(false);
+  });
+
+  test('returns false when engine has more tasks than session (tasks added)', () => {
+    expect(shouldWarnAboutTrackerMismatch(150, 130)).toBe(false);
+  });
+
+  test('returns false when engine has fewer tasks than session (some completed)', () => {
+    // This is normal - some tasks were completed so fewer remain
+    expect(shouldWarnAboutTrackerMismatch(22, 130)).toBe(false);
+  });
+
+  test('returns false when engine has 1 task and session has 1', () => {
+    expect(shouldWarnAboutTrackerMismatch(1, 1)).toBe(false);
+  });
+});
+
 describe('resume command', () => {
   describe('parseResumeArgs', () => {
     describe('cwd option', () => {

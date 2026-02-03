@@ -516,4 +516,76 @@ describe('run command', () => {
       expect(oldBuggyLogic).toBe(true); // This was the bug!
     });
   });
+
+  /**
+   * Tests for parallel mode completion logic.
+   * The parallel mode uses a separate completion flag (parallelAllComplete)
+   * which takes precedence over sequential mode's engine state check.
+   *
+   * This ensures that parallel mode completion works correctly and
+   * that the fix for issue #247 is applied to the fallback sequential path.
+   */
+  describe('parallel mode completion condition', () => {
+    // Helper that mirrors the completion logic in run.tsx
+    // Uses parallelAllComplete if set, otherwise falls back to sequential check
+    const computeAllComplete = (
+      parallelAllComplete: boolean | null,
+      tasksCompleted: number,
+      totalTasks: number
+    ): boolean => {
+      // This mirrors the fixed logic in run.tsx:2862-2865
+      return parallelAllComplete ?? (tasksCompleted >= totalTasks);
+    };
+
+    describe('when parallelAllComplete is set (parallel mode)', () => {
+      test('uses parallelAllComplete=true even when sequential logic says false', () => {
+        // Parallel mode says complete, but sequential would say incomplete
+        expect(computeAllComplete(true, 0, 10)).toBe(true);
+      });
+
+      test('uses parallelAllComplete=false even when sequential logic says true', () => {
+        // Parallel mode says incomplete, but sequential would say complete
+        expect(computeAllComplete(false, 10, 10)).toBe(false);
+      });
+
+      test('parallelAllComplete=true with matching counts', () => {
+        expect(computeAllComplete(true, 5, 5)).toBe(true);
+      });
+
+      test('parallelAllComplete=false with incomplete counts', () => {
+        expect(computeAllComplete(false, 3, 5)).toBe(false);
+      });
+    });
+
+    describe('when parallelAllComplete is null (sequential mode)', () => {
+      test('falls back to sequential logic - incomplete', () => {
+        expect(computeAllComplete(null, 3, 5)).toBe(false);
+      });
+
+      test('falls back to sequential logic - complete', () => {
+        expect(computeAllComplete(null, 5, 5)).toBe(true);
+      });
+
+      test('falls back to sequential logic - empty project', () => {
+        expect(computeAllComplete(null, 0, 0)).toBe(true);
+      });
+
+      test('sequential fallback does NOT use engine status (fix for #247)', () => {
+        // The key assertion: even with null parallelAllComplete,
+        // we only check task counts, not engine status
+        const parallelAllComplete = null;
+        const tasksCompleted = 3;
+        const totalTasks = 5;
+        const engineStatus = 'idle'; // Would always be true after engine stops
+
+        const allComplete = computeAllComplete(parallelAllComplete, tasksCompleted, totalTasks);
+        expect(allComplete).toBe(false);
+
+        // Old buggy fallback would have been:
+        // const allComplete = parallelAllComplete ?? (tasksCompleted >= totalTasks || engineStatus === 'idle');
+        const oldBuggyLogic = parallelAllComplete ?? (tasksCompleted >= totalTasks || engineStatus === 'idle');
+        expect(oldBuggyLogic).toBe(true); // This was the bug!
+      });
+    });
+  });
 });
