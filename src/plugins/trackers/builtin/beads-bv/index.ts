@@ -10,7 +10,7 @@ import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { BeadsTrackerPlugin } from '../beads/index.js';
-import { BEADS_BV_TEMPLATE } from '../templates.js';
+import { BEADS_BV_TEMPLATE } from '../../../../templates/builtin.js';
 import type {
   TrackerPluginMeta,
   TrackerPluginFactory,

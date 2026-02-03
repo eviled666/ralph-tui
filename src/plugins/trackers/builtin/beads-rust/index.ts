@@ -9,7 +9,7 @@ import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import { resolve, relative, isAbsolute, join } from 'node:path';
 import { BaseTrackerPlugin } from '../../base.js';
-import { BEADS_RUST_TEMPLATE } from '../templates.js';
+import { BEADS_RUST_TEMPLATE } from '../../../../templates/builtin.js';
 import type {
   SyncResult,
   TaskCompletionResult,

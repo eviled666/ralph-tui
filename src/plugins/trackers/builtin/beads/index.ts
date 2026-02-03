@@ -9,7 +9,7 @@ import { access, constants } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { BaseTrackerPlugin } from '../../base.js';
-import { BEADS_TEMPLATE } from '../templates.js';
+import { BEADS_TEMPLATE } from '../../../../templates/builtin.js';
 import type {
   SetupQuestion,
   SyncResult,

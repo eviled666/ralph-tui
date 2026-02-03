@@ -7,7 +7,7 @@
 import { readFile, writeFile, access, constants } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { BaseTrackerPlugin } from '../../base.js';
-import { JSON_TEMPLATE } from '../templates.js';
+import { JSON_TEMPLATE } from '../../../../templates/builtin.js';
 import type {
   TrackerPluginMeta,
   TrackerPluginFactory,
