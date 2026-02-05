@@ -1915,13 +1915,10 @@ async function runParallelWithTui(
           parallelState.aiResolving = true;
           triggerRerender?.();
           try {
-            const success = await parallelExecutor.retryConflictResolution();
-            if (success) {
-              // Clear conflict state on success
-              clearConflictState(parallelState);
-            }
+            await parallelExecutor.retryConflictResolution();
+            // State updates handled by conflict:resolved event
           } catch {
-            // Retry failed - state unchanged
+            // Retry failed - state updates handled by conflict:ai-failed event
           } finally {
             parallelState.aiResolving = false;
             triggerRerender?.();

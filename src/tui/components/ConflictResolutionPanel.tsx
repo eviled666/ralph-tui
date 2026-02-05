@@ -325,16 +325,27 @@ export const ConflictResolutionPanel = memo(function ConflictResolutionPanel({
           <>
             {/* Failure state - show retry/skip/abort options */}
             <text>
-              <span fg={colors.accent.tertiary}>r</span>
-              <span fg={colors.fg.muted}> Retry AI  </span>
-              <span fg={colors.accent.tertiary}>s</span>
-              <span fg={colors.fg.muted}> Skip Task  </span>
+              {onRetry && (
+                <>
+                  <span fg={colors.accent.tertiary}>r</span>
+                  <span fg={colors.fg.muted}> Retry AI  </span>
+                </>
+              )}
+              {onSkip && (
+                <>
+                  <span fg={colors.accent.tertiary}>s</span>
+                  <span fg={colors.fg.muted}> Skip Task  </span>
+                </>
+              )}
               <span fg={colors.accent.tertiary}>Esc</span>
               <span fg={colors.fg.muted}> Abort Session</span>
             </text>
-            <text fg={colors.fg.dim}>
-              Retry: re-attempt AI resolution. Skip: abandon this task's merge.
-            </text>
+            {(onRetry || onSkip) && (
+              <text fg={colors.fg.dim}>
+                {onRetry && 'Retry: re-attempt AI resolution. '}
+                {onSkip && "Skip: abandon this task's merge."}
+              </text>
+            )}
             {!onRetry && !onSkip && (
               <text fg={colors.fg.dim}>
                 Manual resolution: git merge {`<worktree-branch>`} in project dir

@@ -162,29 +162,37 @@ export class ParallelExecutor {
       return false;
     }
 
-    // Re-attempt resolution
-    const resolutions = await this.conflictResolver.resolveConflicts(operation);
-    const allResolved = resolutions.every((r) => r.success);
+    // Save tracker state before resolution to prevent stale worktree state from overwriting
+    const savedState = await this.saveTrackerState();
 
-    if (allResolved) {
-      // Success! Clear pending state and mark task as complete
-      this.pendingConflictOperation = null;
-      this.pendingConflictWorkerResult = null;
+    try {
+      // Re-attempt resolution
+      const resolutions = await this.conflictResolver.resolveConflicts(operation);
+      const allResolved = resolutions.every((r) => r.success);
 
-      try {
-        await this.tracker.completeTask(workerResult.task.id);
-      } catch {
-        // Log but don't fail after successful resolution
+      if (allResolved) {
+        // Success! Clear pending state and mark task as complete
+        this.pendingConflictOperation = null;
+        this.pendingConflictWorkerResult = null;
+
+        try {
+          await this.tracker.completeTask(workerResult.task.id);
+        } catch {
+          // Log but don't fail after successful resolution
+        }
+
+        await this.mergeProgressFile(workerResult);
+        this.totalConflictsResolved += resolutions.length;
+        this.totalMergesCompleted++;
+        return true;
       }
 
-      await this.mergeProgressFile(workerResult);
-      this.totalConflictsResolved += resolutions.length;
-      this.totalMergesCompleted++;
-      return true;
+      // Still failed - keep pending state for another retry
+      return false;
+    } finally {
+      // Always restore tracker state to prevent stale worktree data from persisting
+      await this.restoreTrackerState(savedState);
     }
-
-    // Still failed - keep pending state for another retry
-    return false;
   }
 
   /**
@@ -523,8 +531,14 @@ export class ParallelExecutor {
 
           if (allResolved) {
             // Conflict resolution succeeded - mark task as complete
-            this.pendingConflictOperation = null;
-            this.pendingConflictWorkerResult = null;
+            // Only clear pending state if it refers to this conflict (not a different failed one)
+            if (
+              !this.pendingConflictWorkerResult ||
+              this.pendingConflictWorkerResult.task.id === workerResult.task.id
+            ) {
+              this.pendingConflictOperation = null;
+              this.pendingConflictWorkerResult = null;
+            }
             try {
               await this.tracker.completeTask(workerResult.task.id);
             } catch {

@@ -17,7 +17,7 @@ The conflict resolution UI exists but the actual AI resolution is **never wired 
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                      run.tsx                                    │
 │  parallelExecutor.setAiResolver(createAiResolver(config))       │
@@ -50,8 +50,9 @@ Extend `src/config/types.ts`:
 export interface ConflictResolutionConfig {
   /** Whether to attempt AI resolution for merge conflicts (default: true) */
   enabled?: boolean;
-  /** Confidence threshold (0.0-1.0) above which AI resolution is auto-accepted (default: 0.7) */
-  confidenceThreshold?: number;
+  // TODO: Future work - confidenceThreshold not yet implemented
+  // /** Confidence threshold (0.0-1.0) above which AI resolution is auto-accepted (default: 0.7) */
+  // confidenceThreshold?: number;
   /** Timeout in milliseconds for AI resolution per file (default: 120000) */
   timeoutMs?: number;
   /** Maximum files to attempt AI resolution on per conflict (default: 10) */
@@ -220,13 +221,14 @@ Enhance `conflict:ai-resolving` event to include strategy information:
 
 ```typescript
 // In conflict-resolver.ts
+// TODO: Future work - strategy field not yet implemented
 this.emit({
   type: 'conflict:ai-resolving',
   timestamp: new Date().toISOString(),
   operationId,
   taskId,
   filePath: conflict.filePath,
-  strategy: 'fast-path' | 'ai',  // NEW: indicates resolution approach
+  // strategy: 'fast-path' | 'ai',  // Future: indicates resolution approach
 });
 ```
 
