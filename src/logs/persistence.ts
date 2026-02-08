@@ -681,6 +681,7 @@ export async function saveIterationLog(
   // This avoids requiring full raw output strings in memory.
   if (rawStdoutFilePath || rawStderrFilePath) {
     const stream = createWriteStream(filePath, { encoding: 'utf-8' });
+    let writeError: unknown;
     try {
       await writeChunkToStream(stream, formatMetadataHeader(metadata) + LOG_DIVIDER);
 
@@ -707,8 +708,17 @@ export async function saveIterationLog(
         await writeChunkToStream(stream, SUBAGENT_TRACE_DIVIDER);
         await writeChunkToStream(stream, JSON.stringify(subagentTrace, null, 2));
       }
+    } catch (error) {
+      writeError = error;
+      throw error;
     } finally {
-      await closeWriteStream(stream);
+      try {
+        await closeWriteStream(stream);
+      } catch (closeError) {
+        if (!writeError) {
+          throw closeError;
+        }
+      }
     }
     return filePath;
   }

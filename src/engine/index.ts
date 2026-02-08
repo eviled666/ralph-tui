@@ -1052,7 +1052,6 @@ export class ExecutionEngine {
         rawStderrFd = openSync(rawStderrFilePath, 'w');
       } catch {
         closeRawOutputFiles();
-        rawOutputTempDir = undefined;
         rawStdoutFilePath = undefined;
         rawStderrFilePath = undefined;
       }
