@@ -1035,4 +1035,92 @@ describe('BeadsRustTrackerPlugin', () => {
       expect(mockSpawnArgs.map((c) => c.args)).toEqual([['show', 'epic1', '--json']]);
     });
   });
+
+  describe('tombstone filtering', () => {
+    test('getTasks filters out tombstoned issues', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Open task', status: 'open', priority: 2 },
+            { id: 't2', title: 'Deleted task', status: 'tombstone', priority: 2 },
+            { id: 't3', title: 'Closed task', status: 'closed', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const tasks = await plugin.getTasks();
+
+      expect(tasks.length).toBe(2);
+      expect(tasks.map((t) => t.id)).toEqual(['t1', 't3']);
+    });
+
+    test('getEpics filters out tombstoned epics', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 'epic1', title: 'Active epic', status: 'open', priority: 1, issue_type: 'epic' },
+            { id: 'epic2', title: 'Deleted epic', status: 'tombstone', priority: 1, issue_type: 'epic' },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+
+      const epics = await plugin.getEpics();
+
+      expect(epics.length).toBe(1);
+      expect(epics[0]?.id).toBe('epic1');
+    });
+
+    test('getNextTask filters out tombstoned issues', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Deleted', status: 'tombstone', priority: 2 },
+            { id: 't2', title: 'Ready', status: 'open', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const task = await plugin.getNextTask();
+
+      expect(task?.id).toBe('t2');
+    });
+
+    test('getNextTask returns undefined when all tasks are tombstoned', async () => {
+      mockSpawnResponses = [
+        { exitCode: 0, stdout: 'br version 0.4.1\n' },
+        {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            { id: 't1', title: 'Deleted 1', status: 'tombstone', priority: 2 },
+            { id: 't2', title: 'Deleted 2', status: 'tombstone', priority: 2 },
+          ]),
+        },
+      ];
+
+      const plugin = new BeadsRustTrackerPlugin();
+      await plugin.initialize({ workingDir: '/test' });
+      mockSpawnArgs = [];
+
+      const task = await plugin.getNextTask();
+
+      expect(task).toBeUndefined();
+    });
+  });
 });
