@@ -196,6 +196,9 @@ function mergeConfigs(global: StoredConfig, project: StoredConfig): StoredConfig
   if (project.notifications !== undefined) {
     merged.notifications = { ...merged.notifications, ...project.notifications };
   }
+  if (project.parallel !== undefined) {
+    merged.parallel = { ...merged.parallel, ...project.parallel };
+  }
 
   return merged;
 }
