@@ -79,10 +79,10 @@ export interface PrdChatAppProps {
   trackerLabels?: string[];
 
   /** Callback when PRD is successfully generated */
-  onComplete: (result: PrdCreationResult) => void;
+  onComplete: (result: PrdCreationResult) => Promise<void>;
 
   /** Callback when user cancels */
-  onCancel: () => void;
+  onCancel: () => Promise<void>;
 
   /** Callback when an error occurs */
   onError?: (error: string) => void;
@@ -746,6 +746,35 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
     onTextPaste();
   }, [isLoading, imagesEnabled, attachFromClipboard, onTextPaste]);
 
+  const reportCallbackError = useCallback(
+    (context: string, err: unknown) => {
+      const errorMessage =
+        `${context}: ` + (err instanceof Error ? err.message : String(err));
+      setError(errorMessage);
+      onError?.(errorMessage);
+    },
+    [onError],
+  );
+
+  const runOnComplete = useCallback(
+    async (result: PrdCreationResult) => {
+      try {
+        await onComplete(result);
+      } catch (err) {
+        reportCallbackError('Failed to complete PRD workflow', err);
+      }
+    },
+    [onComplete, reportCallbackError],
+  );
+
+  const runOnCancel = useCallback(async () => {
+    try {
+      await onCancel();
+    } catch (err) {
+      reportCallbackError('Failed to cancel PRD workflow', err);
+    }
+  }, [onCancel, reportCallbackError]);
+
   /**
    * Handle keyboard input (only for non-input keys like Escape and review phase shortcuts)
    * Text editing is handled by the native OpenTUI input component
@@ -785,7 +814,7 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
       if (showQuitConfirm) {
         if (key.name === 'y' || key.sequence === 'y' || key.sequence === 'Y') {
           setShowQuitConfirm(false);
-          onCancel();
+          void runOnCancel();
         } else if (
           key.name === 'n' ||
           key.name === 'escape' ||
@@ -839,7 +868,7 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
         if (keyNum === '3') {
           // Done - complete and exit
           if (prdPath && featureName) {
-            onComplete({
+            void runOnComplete({
               prdPath,
               featureName,
               selectedTracker: selectedTrackerFormat,
@@ -853,7 +882,7 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
       if (key.name === 'escape') {
         if (phase === 'review' && prdPath && featureName) {
           // In review phase, escape completes (PRD already saved)
-          onComplete({
+          void runOnComplete({
             prdPath,
             featureName,
             selectedTracker: selectedTrackerFormat,
@@ -870,12 +899,12 @@ Read the PRD and create the appropriate tasks.${labelsInstruction}`;
       phase,
       trackerOptions,
       performClipboardPasteFallback,
+      runOnComplete,
+      runOnCancel,
       handleTrackerSelect,
       prdPath,
       featureName,
       selectedTrackerFormat,
-      onComplete,
-      onCancel,
       renderer,
     ],
   );

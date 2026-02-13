@@ -210,15 +210,6 @@ export async function hasClipboardImage(
 
     case 'linux': {
       // Check clipboard targets for image types
-      if (await commandExists('xclip')) {
-        const result = await execCommand(
-          'xclip',
-          ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
-          timeoutMs,
-        );
-        const targets = result.stdout?.toString() ?? '';
-        return targets.includes('image/png') || targets.includes('image/');
-      }
       if (await commandExists('wl-paste')) {
         const result = await execCommand(
           'wl-paste',
@@ -227,6 +218,15 @@ export async function hasClipboardImage(
         );
         const types = result.stdout?.toString() ?? '';
         return types.includes('image/png') || types.includes('image/');
+      }
+      if (await commandExists('xclip')) {
+        const result = await execCommand(
+          'xclip',
+          ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
+          timeoutMs,
+        );
+        const targets = result.stdout?.toString() ?? '';
+        return targets.includes('image/png') || targets.includes('image/');
       }
       return false;
     }

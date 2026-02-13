@@ -448,27 +448,41 @@ export function useInlineImageIndicators(): UseInlineImageIndicatorsReturn {
         newMap[img.id] = idx + 1;
       });
 
-      // Replace indicators with renumbered versions
-      let result = text;
-      for (const [imageId, oldNumber] of Object.entries(indicatorMap)) {
-        const newNumber = newMap[imageId];
-        if (newNumber !== undefined && newNumber !== oldNumber) {
-          const oldPattern = new RegExp(
-            `${INDICATOR_START}\\[Image ${oldNumber}\\]${INDICATOR_END}`,
-            'g',
-          );
-          const newIndicator = `${INDICATOR_START}[Image ${newNumber}]${INDICATOR_END}`;
-          result = result.replace(oldPattern, newIndicator);
-        }
+      // Build reverse lookup from existing numbers to image IDs.
+      const numberToImageId = new Map<number, string>();
+      for (const [imageId, number] of Object.entries(indicatorMapRef.current)) {
+        numberToImageId.set(number, imageId);
       }
 
+      // Renumber in a single pass to avoid replacement collisions (e.g., swapping 1 <-> 2).
+      const result = text.replace(
+        INDICATOR_PATTERN,
+        (_fullMatch: string, oldNumberText: string) => {
+          const oldNumber = parseInt(oldNumberText, 10);
+          const imageId = numberToImageId.get(oldNumber);
+          if (!imageId) {
+            return `${INDICATOR_START}[Image ${oldNumber}]${INDICATOR_END}`;
+          }
+
+          const newNumber = newMap[imageId];
+          if (newNumber === undefined) {
+            return `${INDICATOR_START}[Image ${oldNumber}]${INDICATOR_END}`;
+          }
+
+          return `${INDICATOR_START}[Image ${newNumber}]${INDICATOR_END}`;
+        },
+      );
+
       // Update the indicator map
+      const nextNumberValue = attachedImages.length + 1;
+      indicatorMapRef.current = newMap;
+      nextNumberRef.current = nextNumberValue;
       setIndicatorMap(newMap);
-      setNextNumber(attachedImages.length + 1);
+      setNextNumber(nextNumberValue);
 
       return result;
     },
-    [indicatorMap],
+    [],
   );
 
   return {

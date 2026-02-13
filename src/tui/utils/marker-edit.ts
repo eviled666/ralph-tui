@@ -78,24 +78,42 @@ export function deleteRangeSafely(args: {
   const b = Math.min(text.length, Math.max(start, end));
   if (a === b) return;
 
-  if (onImageMarkerDeleted) {
-    const markers = findMarkersOverlappingRange(text, a, b);
-    if (markers.length > 0) {
-      const sorted = [...markers].sort((m1, m2) => m2.start - m1.start);
+  const markers = findMarkersOverlappingRange(text, a, b);
+  const rangesToRemove: Array<{ start: number; end: number }> = [
+    { start: a, end: b },
+    ...markers.map((marker) => ({ start: marker.start, end: marker.end })),
+  ];
 
-      let newText = text;
-      for (const m of sorted) {
-        newText = newText.slice(0, m.start) + newText.slice(m.end);
-      }
+  rangesToRemove.sort((r1, r2) => r1.start - r2.start);
 
-      editBuffer.setText(newText);
-      editBuffer.setCursorByOffset(Math.min(...markers.map((m) => m.start)));
-
-      for (const m of markers) onImageMarkerDeleted(m.imageNumber);
-      return;
+  const mergedRanges: Array<{ start: number; end: number }> = [];
+  for (const range of rangesToRemove) {
+    const last = mergedRanges[mergedRanges.length - 1];
+    if (!last || range.start > last.end) {
+      mergedRanges.push({ start: range.start, end: range.end });
+      continue;
     }
+
+    last.end = Math.max(last.end, range.end);
   }
 
-  editBuffer.setText(text.slice(0, a) + text.slice(b));
-  editBuffer.setCursorByOffset(a);
+  let newText = '';
+  let lastEnd = 0;
+  for (const range of mergedRanges) {
+    newText += text.slice(lastEnd, range.start);
+    lastEnd = range.end;
+  }
+  newText += text.slice(lastEnd);
+
+  const nextCursorOffset =
+    markers.length > 0 ? Math.min(a, ...markers.map((marker) => marker.start)) : a;
+
+  editBuffer.setText(newText);
+  editBuffer.setCursorByOffset(Math.min(nextCursorOffset, newText.length));
+
+  if (onImageMarkerDeleted) {
+    for (const marker of markers) {
+      onImageMarkerDeleted(marker.imageNumber);
+    }
+  }
 }
