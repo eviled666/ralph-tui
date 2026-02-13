@@ -24,8 +24,8 @@ import {
 } from '../../chat/engine.js';
 import type { ChatMessage, ChatEvent } from '../../chat/types.js';
 import type { AgentPlugin } from '../../plugins/agents/types.js';
-import type { FormattedSegment } from '../../plugins/agents/output-formatting.js';
-import { parsePrdMarkdown } from '../../prd/index.js';
+import { stripAnsiCodes, type FormattedSegment } from '../../plugins/agents/output-formatting.js';
+import { parsePrdMarkdown } from '../../prd/parser.js';
 import { colors } from '../theme.js';
 import {
   useImageAttachmentWithFeedback,
@@ -70,6 +70,9 @@ export interface PrdChatAppProps {
   prdSkill?: string;
 
   prdSkillSource?: string;
+
+  /** Labels to apply to created beads issues (from config trackerOptions) */
+  trackerLabels?: string[];
 
   /** Callback when PRD is successfully generated */
   onComplete: (result: PrdCreationResult) => void;
@@ -202,6 +205,33 @@ Transform any complex PRD structure (phases, milestones, etc.) into a FLAT list 
 }
 
 /**
+ * Build the labels instruction appended to the beads skill prompt.
+ * Deduplicates labels case-insensitively and always includes 'ralph'.
+ * Returns an empty string when no labels are configured.
+ * @internal Exported for testing
+ */
+export function buildBeadsLabelsInstruction(trackerLabels?: string[]): string {
+  if (!trackerLabels || trackerLabels.length === 0) return '';
+
+  const seen = new Set<string>(['ralph']);
+  const allLabels = ['ralph'];
+  for (const l of trackerLabels) {
+    const key = l.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      allLabels.push(l);
+    }
+  }
+  const labelsStr = allLabels.join(',');
+  return `
+
+IMPORTANT: Apply these labels to EVERY issue created (epic and all child tasks):
+  --labels "${labelsStr}"
+
+Add the --labels flag to every bd create / br create command.`;
+}
+
+/**
  * PRD Preview component for the right panel
  */
 function PrdPreview({
@@ -256,6 +286,7 @@ export function PrdChatApp({
   timeout = 0,
   prdSkill,
   prdSkillSource,
+  trackerLabels,
   onComplete,
   onCancel,
   onError,
@@ -385,12 +416,15 @@ export function PrdChatApp({
       const filename = `prd-${slug}.md`;
       const filepath = join(fullOutputDir, filename);
 
+      // Strip ANSI codes before saving (agents like Kiro output colored text)
+      const cleanContent = stripAnsiCodes(content);
+
       // Write the file
-      await writeFile(filepath, content, 'utf-8');
+      await writeFile(filepath, cleanContent, 'utf-8');
 
       // Update state for review phase
       if (isMountedRef.current) {
-        setPrdContent(content);
+        setPrdContent(cleanContent);
         setPrdPath(filepath);
         setFeatureName(name);
         setPhase('review');
@@ -435,7 +469,12 @@ Press a number key to select, or continue chatting.`,
       const parsedPrd = parsePrdMarkdown(prdContent);
       if (parsedPrd.userStories.length === 0) {
         const errorMessage =
-          'PRD has no user stories. Add sections like "### US-001: Title" with acceptance criteria checklists.';
+          'PRD has no user stories. Add sections with one of these formats:\n' +
+          '  • "### US-001: Title" (standard 3-digit)\n' +
+          '  • "### US-2.1.1: Title" (version-style)\n' +
+          '  • "### EPIC-123: Title" (custom prefix)\n' +
+          '  • "### Feature 1.1: Title" (feature format)\n' +
+          'Each section must include acceptance criteria checklists.';
         setError(errorMessage);
         onError?.(errorMessage);
         return;
@@ -458,11 +497,15 @@ Press a number key to select, or continue chatting.`,
       };
       setMessages((prev) => [...prev, userMsg]);
 
+      // Build labels instruction for beads format
+      const labelsInstruction =
+        format === 'beads' ? buildBeadsLabelsInstruction(trackerLabels) : '';
+
       const prompt = `${option.skillPrompt}
 
 The PRD file is at: ${prdPath}
 
-Read the PRD and create the appropriate tasks.`;
+Read the PRD and create the appropriate tasks.${labelsInstruction}`;
 
       try {
         const result = await taskEngineRef.current.sendMessage(prompt, {
@@ -508,7 +551,7 @@ Read the PRD and create the appropriate tasks.`;
         }
       }
     },
-    [prdPath, prdContent, isLoading, onError],
+    [prdPath, prdContent, isLoading, onError, trackerLabels]
   );
 
   /**

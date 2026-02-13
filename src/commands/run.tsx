@@ -36,9 +36,21 @@ import {
   registerLockCleanupHandlers,
   checkLock,
   detectAndRecoverStaleSession,
+  registerSession,
+  unregisterSession,
+  updateRegistryStatus,
   type PersistedSessionState,
 } from '../session/index.js';
 import { ExecutionEngine } from '../engine/index.js';
+import { ParallelExecutor, analyzeTaskGraph, shouldRunParallel, recommendParallelism } from '../parallel/index.js';
+import { createAiResolver } from '../parallel/ai-resolver.js';
+import type {
+  WorkerDisplayState,
+  MergeOperation,
+  FileConflict,
+  ConflictResolutionResult,
+} from '../parallel/types.js';
+import type { ParallelEvent } from '../parallel/events.js';
 import { registerBuiltinAgents } from '../plugins/agents/builtin/index.js';
 import { registerBuiltinTrackers } from '../plugins/trackers/builtin/index.js';
 import { getAgentRegistry } from '../plugins/agents/registry.js';
@@ -46,7 +58,6 @@ import { getTrackerRegistry } from '../plugins/trackers/registry.js';
 import { RunApp } from '../tui/components/RunApp.js';
 import { EpicSelectionApp } from '../tui/components/EpicSelectionApp.js';
 import type { TrackerPlugin, TrackerTask } from '../plugins/trackers/types.js';
-import { BeadsTrackerPlugin } from '../plugins/trackers/builtin/beads/index.js';
 import type { RalphConfig } from '../config/types.js';
 import { projectConfigExists, runSetupWizard, checkAndMigrate } from '../setup/index.js';
 import { createInterruptHandler } from '../interruption/index.js';
@@ -66,9 +77,34 @@ import {
   type RemoteServer,
   type InstanceTab,
 } from '../remote/index.js';
+import { initializeTheme } from '../tui/theme.js';
 import type { ConnectionToastMessage } from '../tui/components/Toast.js';
 import { spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
+import { getEnvExclusionReport, formatEnvExclusionReport } from '../plugins/agents/base.js';
+
+/**
+ * Determine if all tasks are complete based on parallel/sequential mode state.
+ *
+ * In parallel mode, `parallelAllComplete` is set by the parallel executor.
+ * In sequential mode (parallelAllComplete is null), we check task counts.
+ *
+ * Note: The engine status is always 'idle' after runLoop exits (set in finally block),
+ * so completion must be determined by task counts, not engine status.
+ * See: https://github.com/subsy/ralph-tui/issues/247
+ *
+ * @param parallelAllComplete - Completion flag from parallel mode, or null for sequential
+ * @param tasksCompleted - Number of tasks completed
+ * @param totalTasks - Total number of tasks
+ * @returns true if session should be considered complete
+ */
+export function isSessionComplete(
+  parallelAllComplete: boolean | null,
+  tasksCompleted: number,
+  totalTasks: number
+): boolean {
+  return parallelAllComplete ?? (tasksCompleted >= totalTasks);
+}
 
 /**
  * Get git repository information for the current working directory.
@@ -120,6 +156,17 @@ function getGitInfo(cwd: string): {
 }
 
 /**
+ * Task range filter for --task-range flag.
+ * Allows filtering tasks by 1-indexed position (e.g., 1-5, 3-, -10).
+ */
+export interface TaskRangeFilter {
+  /** Starting task number (1-indexed, inclusive). Undefined means from beginning. */
+  start?: number;
+  /** Ending task number (1-indexed, inclusive). Undefined means to the end. */
+  end?: number;
+}
+
+/**
  * Extended runtime options with noSetup, verify, and listen flags
  */
 interface ExtendedRuntimeOptions extends RuntimeOptions {
@@ -131,6 +178,10 @@ interface ExtendedRuntimeOptions extends RuntimeOptions {
   listenPort?: number;
   /** Rotate server token before starting listener */
   rotateToken?: boolean;
+  /** Merge directly to current branch instead of creating session branch (parallel mode) */
+  directMerge?: boolean;
+  /** Filter tasks by index range (e.g., 1-5, 3-, -10) */
+  taskRange?: TaskRangeFilter;
 }
 
 /**
@@ -318,6 +369,74 @@ export function parseRunArgs(args: string[]): ExtendedRuntimeOptions {
       case '--rotate-token':
         options.rotateToken = true;
         break;
+
+      case '--theme':
+        if (nextArg && !nextArg.startsWith('-')) {
+          options.themePath = nextArg;
+          i++;
+        }
+        break;
+
+      case '--serial':
+      case '--sequential':
+        options.serial = true;
+        break;
+
+      case '--parallel': {
+        // --parallel or --parallel N
+        if (nextArg && !nextArg.startsWith('-')) {
+          const parsed = parseInt(nextArg, 10);
+          if (!isNaN(parsed) && parsed > 0) {
+            options.parallel = parsed;
+            i++;
+          } else {
+            options.parallel = true;
+          }
+        } else {
+          options.parallel = true;
+        }
+        break;
+      }
+
+      case '--direct-merge':
+        options.directMerge = true;
+        break;
+
+      case '--task-range':
+        // Allow nextArg if it exists and either doesn't start with '-' OR matches a negative-integer pattern (e.g., "-10")
+        if (nextArg && (!nextArg.startsWith('-') || /^-\d+$/.test(nextArg))) {
+          const range = nextArg;
+          // Parse range formats: "1-5", "3-", "-10", "5"
+          if (range.includes('-')) {
+            const dashIndex = range.indexOf('-');
+            const startPart = range.substring(0, dashIndex);
+            const endPart = range.substring(dashIndex + 1);
+
+            // Parse and validate start/end values
+            const parsedStart = startPart ? parseInt(startPart, 10) : undefined;
+            const parsedEnd = endPart ? parseInt(endPart, 10) : undefined;
+
+            // Only set taskRange if at least one value is valid
+            if (
+              (parsedStart === undefined || !isNaN(parsedStart)) &&
+              (parsedEnd === undefined || !isNaN(parsedEnd)) &&
+              (parsedStart !== undefined || parsedEnd !== undefined)
+            ) {
+              options.taskRange = {
+                start: parsedStart,
+                end: parsedEnd,
+              };
+            }
+          } else {
+            // Single number means just that task
+            const num = parseInt(range, 10);
+            if (!isNaN(num)) {
+              options.taskRange = { start: num, end: num };
+            }
+          }
+          i++;
+        }
+        break;
     }
   }
 
@@ -343,6 +462,7 @@ Options:
   --prompt <path>     Custom prompt file (default: based on tracker mode)
   --output-dir <path> Directory for iteration logs (default: .ralph-tui/iterations)
   --progress-file <path> Progress file for cross-iteration context (default: .ralph-tui/progress.md)
+  --theme <name|path> Theme name (bright, catppuccin, dracula, high-contrast, solarized-light) or path to custom JSON theme file
   --iterations <n>    Maximum iterations (0 = unlimited)
   --delay <ms>        Delay between iterations in milliseconds
   --cwd <path>        Working directory
@@ -359,6 +479,11 @@ Options:
   --sandbox=sandbox-exec  Force sandbox-exec (macOS)
   --no-sandbox        Disable sandboxing
   --no-network        Disable network access in sandbox
+  --serial            Force sequential execution (skip parallel analysis)
+  --sequential        Alias for --serial
+  --parallel [N]      Force parallel execution with optional max workers (default: 3)
+  --direct-merge      Merge directly to current branch (skip session branch creation)
+  --task-range <range> Filter tasks by index (e.g., 1-5, 3-, -10)
   --listen            Enable remote listener (implies --headless)
   --listen-port <n>   Port for remote listener (default: 7890)
   --rotate-token      Rotate server token before starting listener
@@ -386,6 +511,134 @@ Examples:
   ralph-tui run --no-tui                     # Run headless for CI/scripts
   ralph-tui run --listen --prd ./prd.json    # Run with remote listener enabled
 `);
+}
+
+/**
+ * Resolve parallel execution mode from CLI flags and stored config.
+ * CLI flags take precedence over stored config.
+ *
+ * @returns 'auto' | 'always' | 'never'
+ */
+function resolveParallelMode(
+  options: ExtendedRuntimeOptions,
+  storedConfig?: StoredConfig | null
+): 'auto' | 'always' | 'never' {
+  // CLI flags take absolute precedence
+  if (options.serial) return 'never';
+  if (options.parallel) return 'always';
+
+  // Fall back to stored config
+  return storedConfig?.parallel?.mode ?? 'auto';
+}
+
+/**
+ * Filter tasks by index range.
+ * Task indices are 1-indexed for user friendliness (e.g., --task-range 1-5).
+ *
+ * @param tasks - Full list of tasks to filter
+ * @param taskRange - Range filter (start/end are 1-indexed, inclusive)
+ * @returns Filtered tasks and a message describing the filter applied
+ */
+export function filterTasksByRange(
+  tasks: TrackerTask[],
+  taskRange: TaskRangeFilter
+): { filteredTasks: TrackerTask[]; message: string } {
+  const start = taskRange.start ?? 1;
+  const end = taskRange.end ?? tasks.length;
+
+  // Validate range
+  if (start < 1 || (taskRange.end !== undefined && end < start)) {
+    return {
+      filteredTasks: tasks,
+      message: 'Invalid task range, using all tasks',
+    };
+  }
+
+  // Filter tasks (convert to 0-indexed)
+  const filteredTasks = tasks.filter((_, idx) => {
+    const taskNum = idx + 1; // 1-indexed for users
+    return taskNum >= start && taskNum <= end;
+  });
+
+  // Build message describing the filter
+  let rangeStr: string;
+  if (taskRange.start !== undefined && taskRange.end !== undefined) {
+    rangeStr = `${taskRange.start}-${taskRange.end}`;
+  } else if (taskRange.start !== undefined) {
+    rangeStr = `${taskRange.start}-`;
+  } else if (taskRange.end !== undefined) {
+    rangeStr = `-${taskRange.end}`;
+  } else {
+    rangeStr = 'all';
+  }
+
+  const message = `Task range ${rangeStr}: ${filteredTasks.length} of ${tasks.length} tasks selected`;
+
+  return { filteredTasks, message };
+}
+
+// ─── Conflict Resolution Helpers ────────────────────────────────────────────────
+// These functions encapsulate the conflict resolution logic for testability.
+// They are used by the parallel execution callbacks in RunAppWrapper.
+
+/**
+ * State shape for parallel conflict tracking.
+ * Matches the parallelState object used in parallel execution.
+ */
+export interface ParallelConflictState {
+  conflicts: FileConflict[];
+  conflictResolutions: ConflictResolutionResult[];
+  conflictTaskId: string;
+  conflictTaskTitle: string;
+  aiResolving: boolean;
+}
+
+/**
+ * Clear all conflict-related state after abort or resolution.
+ * Called when user aborts conflict resolution or when conflicts are fully resolved.
+ *
+ * @param state - The parallel state object to clear
+ */
+export function clearConflictState(state: ParallelConflictState): void {
+  state.conflicts = [];
+  state.conflictResolutions = [];
+  state.conflictTaskId = '';
+  state.conflictTaskTitle = '';
+  state.aiResolving = false;
+}
+
+/**
+ * Find a conflict resolution result by file path.
+ * Used when accepting a specific file's AI resolution.
+ *
+ * @param resolutions - Array of resolution results
+ * @param filePath - Path of the file to find
+ * @returns The resolution result if found, undefined otherwise
+ */
+export function findResolutionByPath(
+  resolutions: ConflictResolutionResult[],
+  filePath: string
+): ConflictResolutionResult | undefined {
+  return resolutions.find((r) => r.filePath === filePath);
+}
+
+/**
+ * Check if all conflicts have been successfully resolved.
+ *
+ * @param conflicts - Array of file conflicts
+ * @param resolutions - Array of resolution results
+ * @returns true if all conflicts have successful resolutions
+ */
+export function areAllConflictsResolved(
+  conflicts: FileConflict[],
+  resolutions: ConflictResolutionResult[]
+): boolean {
+  if (conflicts.length === 0) return true;
+  if (resolutions.length < conflicts.length) return false;
+  return conflicts.every((conflict) => {
+    const resolution = resolutions.find((r) => r.filePath === conflict.filePath);
+    return resolution?.success === true;
+  });
 }
 
 /**
@@ -669,7 +922,7 @@ async function showEpicSelectionTui(
  * Props for the RunAppWrapper component
  */
 interface RunAppWrapperProps {
-  engine: ExecutionEngine;
+  engine?: ExecutionEngine;
   interruptHandler: InterruptHandler;
   onQuit: () => Promise<void>;
   onInterruptConfirmed: () => Promise<void>;
@@ -685,6 +938,8 @@ interface RunAppWrapperProps {
   trackerType?: string;
   /** Agent plugin name (from resolved config, includes CLI override) */
   agentPlugin?: string;
+  /** Custom command path for the agent (if configured) */
+  agentCommand?: string;
   /** Current epic ID for highlighting */
   currentEpicId?: string;
   /** Initial subagent panel visibility (from persisted session) */
@@ -699,6 +954,58 @@ interface RunAppWrapperProps {
   resolvedSandboxMode?: Exclude<SandboxMode, 'auto'>;
   /** Whether to show the epic loader immediately on startup (for json tracker without PRD path) */
   initialShowEpicLoader?: boolean;
+  /** Whether parallel execution mode is active */
+  isParallelMode?: boolean;
+  /** Parallel workers display state */
+  parallelWorkers?: WorkerDisplayState[];
+  /** Worker output lines keyed by worker ID */
+  parallelWorkerOutputs?: Map<string, string[]>;
+  /** Merge queue state */
+  parallelMergeQueue?: MergeOperation[];
+  /** Current parallel group index */
+  parallelCurrentGroup?: number;
+  /** Total number of parallel groups */
+  parallelTotalGroups?: number;
+  /** Session backup tag for rollback */
+  parallelSessionBackupTag?: string;
+  /** Active file conflicts during merge */
+  parallelConflicts?: FileConflict[];
+  /** Conflict resolution results */
+  parallelConflictResolutions?: ConflictResolutionResult[];
+  /** Task ID of the conflicting merge */
+  parallelConflictTaskId?: string;
+  /** Task title of the conflicting merge */
+  parallelConflictTaskTitle?: string;
+  /** Whether AI conflict resolution is running */
+  parallelAiResolving?: boolean;
+  /** The file currently being resolved by AI */
+  parallelCurrentlyResolvingFile?: string;
+  /** Whether to show the conflict panel (true during Phase 2 conflict resolution) */
+  parallelShowConflicts?: boolean;
+  /** Maps task IDs to worker IDs for output routing in parallel mode */
+  parallelTaskIdToWorkerId?: Map<string, string>;
+  /** Task IDs that completed locally but merge failed (shows ⚠ in TUI) */
+  parallelCompletedLocallyTaskIds?: Set<string>;
+  /** Task IDs where auto-commit was skipped (e.g., files were gitignored) */
+  parallelAutoCommitSkippedTaskIds?: Set<string>;
+  /** Task IDs that have been successfully merged (shows ✓ done in TUI) */
+  parallelMergedTaskIds?: Set<string>;
+  /** Number of currently active (running) workers */
+  activeWorkerCount?: number;
+  /** Total number of workers */
+  totalWorkerCount?: number;
+  /** Callback to pause parallel execution */
+  onParallelPause?: () => void;
+  /** Callback to resume parallel execution */
+  onParallelResume?: () => void;
+  /** Callback to immediately kill all parallel workers */
+  onParallelKill?: () => Promise<void>;
+  /** Callback to restart parallel execution after stop/complete */
+  onParallelStart?: () => void;
+  /** Callback when user requests conflict resolution retry */
+  onConflictRetry?: () => Promise<void>;
+  /** Callback when user requests to skip a failed merge */
+  onConflictSkip?: () => void;
 }
 
 /**
@@ -716,6 +1023,7 @@ function RunAppWrapper({
   cwd = process.cwd(),
   trackerType,
   agentPlugin,
+  agentCommand,
   currentEpicId: initialEpicId,
   initialSubagentPanelVisible = false,
   onUpdatePersistedState,
@@ -723,6 +1031,32 @@ function RunAppWrapper({
   sandboxConfig,
   resolvedSandboxMode,
   initialShowEpicLoader = false,
+  isParallelMode = false,
+  parallelWorkers,
+  parallelWorkerOutputs,
+  parallelMergeQueue,
+  parallelCurrentGroup,
+  parallelTotalGroups,
+  parallelSessionBackupTag,
+  parallelConflicts,
+  parallelConflictResolutions,
+  parallelConflictTaskId,
+  parallelConflictTaskTitle,
+  parallelAiResolving,
+  parallelCurrentlyResolvingFile,
+  parallelShowConflicts,
+  parallelTaskIdToWorkerId,
+  parallelCompletedLocallyTaskIds,
+  parallelAutoCommitSkippedTaskIds,
+  parallelMergedTaskIds,
+  activeWorkerCount,
+  totalWorkerCount,
+  onParallelPause,
+  onParallelResume,
+  onParallelKill,
+  onParallelStart,
+  onConflictRetry,
+  onConflictSkip,
 }: RunAppWrapperProps) {
   const [showInterruptDialog, setShowInterruptDialog] = useState(false);
   const [storedConfig, setStoredConfig] = useState<StoredConfig | undefined>(initialStoredConfig);
@@ -777,8 +1111,9 @@ function RunAppWrapper({
     setStoredConfig(newConfig);
   };
 
-  // Handle loading available epics
+  // Handle loading available epics (engine absent in parallel mode)
   const handleLoadEpics = async (): Promise<TrackerTask[]> => {
+    if (!engine) throw new Error('Epic loading not available in parallel mode');
     const tracker = engine.getTracker();
     if (!tracker) {
       throw new Error('Tracker not available');
@@ -786,8 +1121,9 @@ function RunAppWrapper({
     return tracker.getEpics();
   };
 
-  // Handle epic switch
+  // Handle epic switch (engine absent in parallel mode)
   const handleEpicSwitch = async (epic: TrackerTask): Promise<void> => {
+    if (!engine) throw new Error('Epic switching not available in parallel mode');
     const tracker = engine.getTracker();
     if (!tracker) {
       throw new Error('Tracker not available');
@@ -815,8 +1151,9 @@ function RunAppWrapper({
     engine.refreshTasks();
   };
 
-  // Handle file path switch (for json tracker)
+  // Handle file path switch (for json tracker — engine absent in parallel mode)
   const handleFilePathSwitch = async (path: string): Promise<boolean> => {
+    if (!engine) return false;
     const tracker = engine.getTracker();
     if (!tracker) {
       return false;
@@ -882,6 +1219,7 @@ function RunAppWrapper({
       onFilePathSwitch={handleFilePathSwitch}
       trackerType={trackerType}
       agentPlugin={agentPlugin}
+      agentCommand={agentCommand}
       currentEpicId={currentEpicId}
       initialSubagentPanelVisible={initialSubagentPanelVisible}
       onSubagentPanelVisibilityChange={handleSubagentPanelVisibilityChange}
@@ -895,6 +1233,32 @@ function RunAppWrapper({
       instanceManager={instanceManager}
       initialShowEpicLoader={initialShowEpicLoader}
       localGitInfo={localGitInfo}
+      isParallelMode={isParallelMode}
+      parallelWorkers={parallelWorkers}
+      parallelWorkerOutputs={parallelWorkerOutputs}
+      parallelMergeQueue={parallelMergeQueue}
+      parallelCurrentGroup={parallelCurrentGroup}
+      parallelTotalGroups={parallelTotalGroups}
+      parallelSessionBackupTag={parallelSessionBackupTag}
+      parallelConflicts={parallelConflicts}
+      parallelConflictResolutions={parallelConflictResolutions}
+      parallelConflictTaskId={parallelConflictTaskId}
+      parallelConflictTaskTitle={parallelConflictTaskTitle}
+      parallelAiResolving={parallelAiResolving}
+      parallelCurrentlyResolvingFile={parallelCurrentlyResolvingFile}
+      parallelShowConflicts={parallelShowConflicts}
+      parallelTaskIdToWorkerId={parallelTaskIdToWorkerId}
+      parallelCompletedLocallyTaskIds={parallelCompletedLocallyTaskIds}
+      parallelAutoCommitSkippedTaskIds={parallelAutoCommitSkippedTaskIds}
+      parallelMergedTaskIds={parallelMergedTaskIds}
+      activeWorkerCount={activeWorkerCount}
+      totalWorkerCount={totalWorkerCount}
+      onParallelPause={onParallelPause}
+      onParallelResume={onParallelResume}
+      onParallelKill={onParallelKill}
+      onParallelStart={onParallelStart}
+      onConflictRetry={onConflictRetry}
+      onConflictSkip={onConflictSkip}
     />
   );
 }
@@ -1119,6 +1483,7 @@ async function runWithTui(
       cwd={config.cwd}
       trackerType={config.tracker.plugin}
       agentPlugin={config.agent.plugin}
+      agentCommand={config.agent.command}
       currentEpicId={config.epicId}
       initialSubagentPanelVisible={persistedState.subagentPanelVisible ?? false}
       onUpdatePersistedState={handleUpdatePersistedState}
@@ -1154,6 +1519,449 @@ async function runWithTui(
 
   // Wait for user to explicitly quit (q key or Ctrl+C)
   // This promise resolves when gracefulShutdown is called
+  await new Promise<void>((resolve) => {
+    resolveQuitPromise = resolve;
+  });
+
+  clearInterval(checkCallbacks);
+
+  return currentState;
+}
+
+/**
+ * Run the parallel executor with TUI visualization.
+ *
+ * Similar to runWithTui but tailored for parallel execution:
+ * - No single ExecutionEngine — the ParallelExecutor manages multiple workers
+ * - Subscribes to ParallelExecutor events and translates them to React state
+ * - Passes parallel-specific props (workers, merge queue, conflicts) to RunApp
+ * - Starts execution automatically (no "ready" state — parallel is always auto-start)
+ */
+async function runParallelWithTui(
+  parallelExecutor: ParallelExecutor,
+  persistedState: PersistedSessionState,
+  config: RalphConfig,
+  initialTasks: TrackerTask[],
+  storedConfig?: StoredConfig,
+): Promise<PersistedSessionState> {
+  let currentState = persistedState;
+  let resolveQuitPromise: (() => void) | null = null;
+  let showDialogCallback: (() => void) | null = null;
+  let hideDialogCallback: (() => void) | null = null;
+  let cancelledCallback: (() => void) | null = null;
+
+  // Shared mutable state object for parallel props.
+  // Using a single object ref avoids closure staleness: the React component holds a reference
+  // to this object and reads current values on each render, even if renders are delayed by
+  // synchronous operations (like execSync in worktree/merge commands) blocking the event loop.
+  const parallelState = {
+    workers: [] as WorkerDisplayState[],
+    workerOutputs: new Map<string, string[]>(),
+    mergeQueue: [] as MergeOperation[],
+    currentGroup: 0,
+    totalGroups: 0,
+    conflicts: [] as FileConflict[],
+    conflictResolutions: [] as ConflictResolutionResult[],
+    conflictTaskId: '',
+    conflictTaskTitle: '',
+    aiResolving: false,
+    /** The file currently being resolved by AI */
+    currentlyResolvingFile: '' as string,
+    /** Whether to show the conflict panel (set true at Phase 2 start, false when resolved) */
+    showConflicts: false,
+    /** Maps task IDs to their assigned worker IDs for output routing */
+    taskIdToWorkerId: new Map<string, string>(),
+    /** Task IDs that completed locally but merge failed (shows ⚠ in TUI) */
+    completedLocallyTaskIds: new Set<string>(),
+    /** Task IDs where auto-commit was skipped (e.g., files were gitignored) */
+    autoCommitSkippedTaskIds: new Set<string>(),
+    /** Task IDs that have been successfully merged (shows ✓ done in TUI) */
+    mergedTaskIds: new Set<string>(),
+    /** Session branch name (e.g., "ralph-session/a4d1aae7") */
+    sessionBranch: null as string | null,
+    /** Original branch before session branch was created */
+    originalBranch: null as string | null,
+  };
+
+  // Render trigger — forces React to re-render with updated parallel state.
+  // When null, events are queued implicitly in the shared state object and picked up
+  // on the next render (no events are lost even if the trigger isn't set yet).
+  let triggerRerender: (() => void) | null = null;
+
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: false,
+  });
+
+  const root = createRoot(renderer);
+
+  // Subscribe to parallel events and translate to TUI state.
+  // All mutations target the shared parallelState object so values are visible
+  // to the React component on its next render, regardless of timing.
+  parallelExecutor.on((event: ParallelEvent) => {
+    switch (event.type) {
+      case 'parallel:started':
+        parallelState.totalGroups = event.totalGroups;
+        break;
+
+      case 'parallel:session-branch-created':
+        // Track session branch info in local state and persisted session
+        parallelState.sessionBranch = event.sessionBranch;
+        parallelState.originalBranch = event.originalBranch;
+        // Note: Session state is managed by the caller; branch info will be
+        // retrieved from parallelExecutor after completion
+        break;
+
+      case 'parallel:group-started':
+        parallelState.currentGroup = event.groupIndex;
+        break;
+
+      case 'worker:created': {
+        // Worker created but not yet started — refresh from executor
+        parallelState.workers = parallelExecutor.getWorkerStates();
+        // Record task→worker mapping for output routing in the TUI
+        // Create new Map so React's memoization detects the change
+        const newTaskMap = new Map(parallelState.taskIdToWorkerId);
+        newTaskMap.set(event.task.id, event.workerId);
+        parallelState.taskIdToWorkerId = newTaskMap;
+        break;
+      }
+
+      case 'worker:started':
+        // Refresh workers from executor state
+        parallelState.workers = parallelExecutor.getWorkerStates();
+        // Mark task as active in persisted session state
+        currentState = addActiveTask(currentState, event.task.id);
+        savePersistedSession(currentState).catch(() => {});
+        break;
+
+      case 'worker:progress':
+        // Refresh workers from executor state
+        parallelState.workers = parallelExecutor.getWorkerStates();
+        break;
+
+      case 'worker:output':
+        // Append output to the worker's output buffer
+        // Replace the Map instance so downstream memos observe the change
+        if (event.stream === 'stdout' && event.data.trim()) {
+          const existing = parallelState.workerOutputs.get(event.workerId) ?? [];
+          // Keep last 500 lines per worker to prevent memory bloat
+          const lines = [...existing, ...event.data.split('\n').filter((l: string) => l.trim())];
+          // Create new Map from existing entries, then set the updated lines
+          const newMap = new Map(parallelState.workerOutputs);
+          newMap.set(event.workerId, lines.slice(-500));
+          parallelState.workerOutputs = newMap;
+        }
+        break;
+
+      case 'worker:completed':
+        // Refresh workers from executor state
+        parallelState.workers = parallelExecutor.getWorkerStates();
+        // Remove task from active list in persisted session state
+        currentState = removeActiveTask(currentState, event.result.task.id);
+        savePersistedSession(currentState).catch(() => {});
+        // Track tasks that the worker marked as completed (agent said COMPLETED)
+        // These will be marked as "completedLocally" if merge subsequently fails
+        if (event.result.taskCompleted) {
+          // Create new Set so React detects the change (Set mutation doesn't change reference)
+          parallelState.completedLocallyTaskIds = new Set([
+            ...parallelState.completedLocallyTaskIds,
+            event.result.task.id,
+          ]);
+        }
+        break;
+
+      case 'worker:failed':
+        // Refresh workers from executor state
+        parallelState.workers = parallelExecutor.getWorkerStates();
+        // Remove task from active list in persisted session state
+        currentState = removeActiveTask(currentState, event.task.id);
+        savePersistedSession(currentState).catch(() => {});
+        break;
+
+      case 'merge:queued':
+      case 'merge:started':
+        // Refresh merge queue from executor state
+        parallelState.mergeQueue = [...parallelExecutor.getState().mergeQueue];
+        break;
+
+      case 'merge:completed': {
+        // Refresh merge queue from executor state
+        parallelState.mergeQueue = [...parallelExecutor.getState().mergeQueue];
+        // Task successfully merged — remove from completedLocally set (it's now fully done)
+        // Create new Set so React detects the change
+        const newSet = new Set(parallelState.completedLocallyTaskIds);
+        newSet.delete(event.taskId);
+        parallelState.completedLocallyTaskIds = newSet;
+        // Add to merged set so TUI shows ✓ done even if worker state was cleared
+        parallelState.mergedTaskIds = new Set([
+          ...parallelState.mergedTaskIds,
+          event.taskId,
+        ]);
+        break;
+      }
+
+      case 'merge:failed':
+      case 'merge:rolled-back':
+        // Refresh merge queue from executor state
+        parallelState.mergeQueue = [...parallelExecutor.getState().mergeQueue];
+        // Note: completedLocallyTaskIds already has this task if worker completed it,
+        // so it will show ⚠ icon (completed locally but merge failed)
+        break;
+
+      case 'conflict:detected':
+        parallelState.conflicts = event.conflicts;
+        parallelState.conflictTaskId = event.taskId;
+        // Task title is not on the event — look up from initial tasks
+        parallelState.conflictTaskTitle = initialTasks.find((t) => t.id === event.taskId)?.title ?? event.taskId;
+        // Clear prior resolution state so UI reflects only the new conflict
+        parallelState.conflictResolutions = [];
+        parallelState.aiResolving = false;
+        break;
+
+      case 'conflict:ai-resolving':
+        parallelState.aiResolving = true;
+        parallelState.currentlyResolvingFile = event.filePath;
+        // Show the conflict panel now that Phase 2 (resolution) has started
+        parallelState.showConflicts = true;
+        break;
+
+      case 'conflict:ai-resolved':
+        parallelState.aiResolving = false;
+        parallelState.currentlyResolvingFile = '';
+        parallelState.conflictResolutions = [...parallelState.conflictResolutions, event.result];
+        break;
+
+      case 'conflict:ai-failed':
+        parallelState.aiResolving = false;
+        parallelState.currentlyResolvingFile = '';
+        break;
+
+      case 'conflict:resolved': {
+        parallelState.conflicts = [];
+        parallelState.conflictResolutions = event.results;
+        parallelState.conflictTaskId = '';
+        parallelState.conflictTaskTitle = '';
+        parallelState.aiResolving = false;
+        parallelState.currentlyResolvingFile = '';
+        // Hide the conflict panel now that resolution is complete
+        parallelState.showConflicts = false;
+        // Refresh merge queue to show updated status (conflicted -> completed)
+        parallelState.mergeQueue = [...parallelExecutor.getState().mergeQueue];
+        // Task successfully merged after conflict resolution — update tracking sets
+        // Remove from completedLocally (no more ⚠ warning) and add to merged (shows ✓)
+        const resolvedSet = new Set(parallelState.completedLocallyTaskIds);
+        resolvedSet.delete(event.taskId);
+        parallelState.completedLocallyTaskIds = resolvedSet;
+        parallelState.mergedTaskIds = new Set([
+          ...parallelState.mergedTaskIds,
+          event.taskId,
+        ]);
+        break;
+      }
+
+      case 'parallel:completed':
+        currentState = completeSession(currentState);
+        savePersistedSession(currentState).catch(() => {});
+        break;
+
+      case 'parallel:failed':
+        currentState = failSession(currentState);
+        savePersistedSession(currentState).catch(() => {});
+        break;
+    }
+
+    // Trigger React re-render (may be null if React hasn't committed yet —
+    // that's OK because the shared state object will have the latest values
+    // when React does render)
+    triggerRerender?.();
+  });
+
+  // Subscribe to engine events forwarded from workers to catch auto-commit-skipped.
+  // This provides early warning when files are gitignored and won't be committed.
+  parallelExecutor.onEngineEvent((event) => {
+    if (event.type === 'task:auto-commit-skipped') {
+      // Create new Set so React detects the change
+      parallelState.autoCommitSkippedTaskIds = new Set([
+        ...parallelState.autoCommitSkippedTaskIds,
+        event.task.id,
+      ]);
+      triggerRerender?.();
+    }
+  });
+
+  // Cleanup function
+  const cleanup = async (): Promise<void> => {
+    interruptHandler.dispose();
+    renderer.destroy();
+  };
+
+  // Graceful shutdown
+  const gracefulShutdown = async (): Promise<void> => {
+    await parallelExecutor.stop();
+    await savePersistedSession(currentState);
+    await cleanup();
+    resolveQuitPromise?.();
+  };
+
+  // Force quit
+  const forceQuit = (): void => {
+    process.exit(1);
+  };
+
+  // Create interrupt handler
+  const interruptHandler = createInterruptHandler({
+    doublePressWindowMs: 1000,
+    onConfirmed: gracefulShutdown,
+    onCancelled: () => {
+      cancelledCallback?.();
+    },
+    onShowDialog: () => {
+      showDialogCallback?.();
+    },
+    onHideDialog: () => {
+      hideDialogCallback?.();
+    },
+    onForceQuit: forceQuit,
+  });
+
+  process.on('SIGTERM', gracefulShutdown);
+
+  // Detect actual sandbox mode at startup
+  const resolvedSandboxMode = config.sandbox?.enabled
+    ? await detectSandboxMode()
+    : undefined;
+
+  // Wrapper component that re-renders when parallel state changes.
+  // Reads from the shared parallelState object on each render, so it always
+  // sees the latest values even if some event-driven triggerRerender calls
+  // were missed during synchronous blocking operations.
+  function ParallelRunAppWrapper(): ReturnType<typeof RunAppWrapper> {
+    // State trigger for re-renders from parallel events
+    const [, setTick] = useState(0);
+
+    // Register the re-render trigger + set up a polling interval as safety net.
+    // The polling ensures the TUI stays updated even when execSync calls in
+    // worktree-manager/merge-engine block the event loop and prevent event-driven
+    // re-renders from firing promptly.
+    useEffect(() => {
+      triggerRerender = () => setTick((t) => t + 1);
+
+      // Poll every 500ms to catch any state changes that were missed
+      // while the event loop was blocked by synchronous git operations
+      const pollInterval = setInterval(() => {
+        setTick((t) => t + 1);
+      }, 500);
+
+      return () => {
+        triggerRerender = null;
+        clearInterval(pollInterval);
+      };
+    }, []);
+
+    return (
+      <RunAppWrapper
+        interruptHandler={interruptHandler}
+        onQuit={gracefulShutdown}
+        onInterruptConfirmed={gracefulShutdown}
+        initialTasks={initialTasks}
+        storedConfig={storedConfig}
+        cwd={config.cwd}
+        trackerType={config.tracker.plugin}
+        agentPlugin={config.agent.plugin}
+        agentCommand={config.agent.command}
+        currentEpicId={config.epicId}
+        currentModel={config.model}
+        sandboxConfig={config.sandbox}
+        resolvedSandboxMode={resolvedSandboxMode}
+        isParallelMode={true}
+        parallelWorkers={parallelState.workers}
+        parallelWorkerOutputs={parallelState.workerOutputs}
+        parallelMergeQueue={parallelState.mergeQueue}
+        parallelCurrentGroup={parallelState.currentGroup}
+        parallelTotalGroups={parallelState.totalGroups}
+        parallelConflicts={parallelState.conflicts}
+        parallelConflictResolutions={parallelState.conflictResolutions}
+        parallelConflictTaskId={parallelState.conflictTaskId}
+        parallelConflictTaskTitle={parallelState.conflictTaskTitle}
+        parallelAiResolving={parallelState.aiResolving}
+        parallelCurrentlyResolvingFile={parallelState.currentlyResolvingFile}
+        parallelShowConflicts={parallelState.showConflicts}
+        parallelTaskIdToWorkerId={parallelState.taskIdToWorkerId}
+        parallelCompletedLocallyTaskIds={parallelState.completedLocallyTaskIds}
+        parallelAutoCommitSkippedTaskIds={parallelState.autoCommitSkippedTaskIds}
+        parallelMergedTaskIds={parallelState.mergedTaskIds}
+        activeWorkerCount={parallelState.workers.filter((w) => w.status === 'running').length}
+        totalWorkerCount={parallelState.workers.length}
+        onParallelPause={() => parallelExecutor.pause()}
+        onParallelResume={() => parallelExecutor.resume()}
+        onParallelKill={async () => {
+          await parallelExecutor.stop();
+        }}
+        onParallelStart={() => {
+          // Reset executor state and re-run
+          // Use new instances instead of .clear() so React detects state changes
+          parallelState.workers = [];
+          parallelState.workerOutputs = new Map();
+          parallelState.taskIdToWorkerId = new Map();
+          parallelExecutor.reset();
+          parallelExecutor.execute().then(() => {
+            triggerRerender?.();
+          }).catch(() => {
+            triggerRerender?.();
+          });
+        }}
+        onConflictRetry={async () => {
+          // Re-attempt AI conflict resolution
+          parallelState.aiResolving = true;
+          triggerRerender?.();
+          try {
+            await parallelExecutor.retryConflictResolution();
+            // State updates handled by conflict:resolved event
+          } catch {
+            // Retry failed - state updates handled by conflict:ai-failed event
+          } finally {
+            parallelState.aiResolving = false;
+            triggerRerender?.();
+          }
+        }}
+        onConflictSkip={() => {
+          // Skip this failed merge and continue
+          parallelExecutor.skipFailedConflict();
+          // Clear conflict state
+          clearConflictState(parallelState);
+          triggerRerender?.();
+        }}
+      />
+    );
+  }
+
+  // Render the parallel TUI
+  root.render(<ParallelRunAppWrapper />);
+
+  // Set up interrupt handler callbacks
+  const checkCallbacks = setInterval(() => {
+    const handler = interruptHandler as {
+      _showDialog?: () => void;
+      _hideDialog?: () => void;
+      _cancelled?: () => void;
+    };
+    if (handler._showDialog) showDialogCallback = handler._showDialog;
+    if (handler._hideDialog) hideDialogCallback = handler._hideDialog;
+    if (handler._cancelled) cancelledCallback = handler._cancelled;
+  }, 10);
+
+  // Start parallel execution (non-blocking — runs in background while TUI renders).
+  // Errors are reported via the parallel:failed event, which updates the shared state.
+  // We must NOT use console.error here — it would corrupt the TUI output.
+  parallelExecutor.execute().then(() => {
+    // Execution finished — TUI stays open for user review
+    triggerRerender?.();
+  }).catch(() => {
+    // Error already emitted as parallel:failed event; just trigger a re-render
+    triggerRerender?.();
+  });
+
+  // Wait for user to quit
   await new Promise<void>((resolve) => {
     resolveQuitPromise = resolve;
   });
@@ -1473,6 +2281,24 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   const options = parseRunArgs(args);
   const cwd = options.cwd ?? process.cwd();
 
+  // Detect markdown PRD files and show helpful guidance
+  if (options.prdPath && /\.(?:md|markdown)$/i.test(options.prdPath)) {
+    console.error('');
+    console.error('Error: Markdown PRD files cannot be used directly with --prd.');
+    console.error('');
+    console.error('The --prd flag expects a JSON file (prd.json format).');
+    console.error('');
+    console.error('To convert your markdown PRD, use one of these commands:');
+    console.error('');
+    console.error(`  ralph-tui convert --to json --input ${options.prdPath}`);
+    console.error(`  ralph-tui convert --to beads --input ${options.prdPath}`);
+    console.error('');
+    console.error('The "json" format creates a prd.json file for the JSON tracker.');
+    console.error('The "beads" format imports tasks directly into your .beads database.');
+    console.error('');
+    process.exit(1);
+  }
+
   // Check if project config exists
   const configExists = await projectConfigExists(cwd);
 
@@ -1513,6 +2339,18 @@ export async function executeRunCommand(args: string[]): Promise<void> {
 
   console.log('Initializing Ralph TUI...');
 
+  // Initialize theme before any TUI components render
+  // This must happen early to ensure colors are available when components load
+  if (options.themePath) {
+    try {
+      await initializeTheme(options.themePath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`\nTheme loading failed: ${message}`);
+      process.exit(1);
+    }
+  }
+
   // Initialize plugins
   await initializePlugins();
 
@@ -1539,6 +2377,31 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   for (const warning of validation.warnings) {
     console.warn(`Warning: ${warning}`);
   }
+
+  // Show environment variable exclusion report upfront (using resolved agent config)
+  const envReport = getEnvExclusionReport(
+    process.env,
+    config.agent.envPassthrough,
+    config.agent.envExclude
+  );
+  const envLines = formatEnvExclusionReport(envReport);
+  for (const line of envLines) {
+    console.log(line);
+  }
+
+  // Block until Enter so user can read blocked vars before TUI clears screen.
+  // Only block in interactive TUI mode (stdin is TTY and not headless).
+  if (envReport.blocked.length > 0 && process.stdin.isTTY && !options.headless) {
+    const { createInterface } = await import('node:readline');
+    await new Promise<void>(resolve => {
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      rl.question('  Press Enter to continue...', () => {
+        rl.close();
+        resolve();
+      });
+    });
+  }
+  console.log('');
 
   // Run preflight check if --verify flag is specified
   if (options.verify) {
@@ -1576,7 +2439,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   }
 
   // If using beads tracker without epic, show epic selection TUI
-  const isBeadsTracker = config.tracker.plugin === 'beads' || config.tracker.plugin === 'beads-bv';
+  const isBeadsTracker = config.tracker.plugin === 'beads' || config.tracker.plugin === 'beads-bv' || config.tracker.plugin === 'beads-rust';
   if (isBeadsTracker && !config.epicId && config.showTui) {
     console.log('No epic specified. Loading epic selection...');
 
@@ -1597,7 +2460,7 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     config.tracker.options.epicId = selectedEpic.id;
 
     // If the tracker has a setEpicId method, call it
-    if (tracker instanceof BeadsTrackerPlugin) {
+    if (tracker.setEpicId) {
       tracker.setEpicId(selectedEpic.id);
     }
 
@@ -1715,6 +2578,17 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     await detectAndHandleStaleTasks(config.cwd, tracker, options.headless ?? false);
 
     tasks = await tracker.getTasks({ status: ['open', 'in_progress', 'completed'] });
+
+    // Apply task range filter if specified
+    if (options.taskRange) {
+      const { filteredTasks, message } = filterTasksByRange(tasks, options.taskRange);
+      tasks = filteredTasks;
+      console.log(`📊 ${message}`);
+
+      // Set filtered task IDs on config so ExecutionEngine respects the filter
+      // This is needed because ExecutionEngine calls tracker.getNextTask() directly
+      config.filteredTaskIds = filteredTasks.map((t) => t.id);
+    }
   } catch (error) {
     console.error(
       'Failed to initialize engine:',
@@ -1777,6 +2651,12 @@ export async function executeRunCommand(args: string[]): Promise<void> {
         gitInfo,
         cwd,
       });
+      // Enable remote orchestration by setting parallel config
+      remoteServer.setParallelConfig({
+        baseConfig: config,
+        tracker,
+      });
+
       const serverState = await remoteServer.start();
       const actualPort = serverState.port;
 
@@ -1843,6 +2723,20 @@ export async function executeRunCommand(args: string[]): Promise<void> {
   // Save initial state
   await savePersistedSession(persistedState);
 
+  // Register session in global registry for cross-directory resume
+  await registerSession({
+    sessionId: session.id,
+    cwd: config.cwd,
+    status: 'running',
+    startedAt: persistedState.startedAt,
+    updatedAt: persistedState.updatedAt,
+    agentPlugin: config.agent.plugin,
+    trackerPlugin: config.tracker.plugin,
+    epicId: config.epicId,
+    prdPath: config.prdPath,
+    sandbox: config.sandbox?.enabled,
+  });
+
   // Resolve notification settings from config + CLI flags
   const notificationsEnabled = resolveNotificationsEnabled(
     storedConfig?.notifications,
@@ -1854,14 +2748,251 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     soundMode,
   };
 
-  // Run with TUI or headless
+  // Determine parallel vs sequential execution mode
+  const parallelMode = resolveParallelMode(options, storedConfig);
+
+  // Get actionable tasks for parallel analysis (used by both analysis and heuristics)
+  const actionableTasks = tasks.filter(
+    (t) => t.status === 'open' || t.status === 'in_progress'
+  );
+
+  // Check if parallel execution should be used
+  let useParallel = false;
+  let taskGraphAnalysis: ReturnType<typeof analyzeTaskGraph> | null = null;
+
+  if (parallelMode !== 'never' && actionableTasks.length >= 2) {
+    taskGraphAnalysis = analyzeTaskGraph(actionableTasks);
+
+    if (parallelMode === 'always') {
+      useParallel = taskGraphAnalysis.maxParallelism >= 2;
+    } else {
+      // 'auto' mode
+      useParallel = shouldRunParallel(taskGraphAnalysis);
+    }
+
+    if (useParallel && !config.showTui) {
+      // Only log to console in headless mode — TUI mode shows this in the header
+      console.log(`Parallel execution enabled: ${taskGraphAnalysis.groups.length} group(s), max parallelism ${taskGraphAnalysis.maxParallelism}`);
+    }
+  }
+
+  // Track parallel completion state for final check (set inside useParallel block)
+  let parallelAllComplete: boolean | null = null;
+
+  // Run parallel or sequential execution
   try {
-    if (config.showTui) {
+    if (useParallel) {
+      // Check if autoCommit is enabled — required for parallel mode
+      if (!config.autoCommit) {
+        console.log('\n⚠️  Auto-commit is currently disabled.');
+        console.log('Parallel mode requires auto-commit to merge worker changes back to main.\n');
+
+        const { promptSelect } = await import('../setup/prompts.js');
+        const choice = await promptSelect<'enable' | 'sequential' | 'quit'>(
+          'How would you like to proceed?',
+          [
+            { value: 'enable', label: 'Enable auto-commit for this session (recommended)' },
+            { value: 'sequential', label: 'Fall back to sequential mode (no auto-commit)' },
+            { value: 'quit', label: 'Quit' },
+          ]
+        );
+
+        if (choice === 'quit') {
+          process.exit(0);
+        } else if (choice === 'sequential') {
+          console.log('\nSwitching to sequential mode...\n');
+          // Fall through to sequential execution below
+          useParallel = false;
+        } else {
+          // choice === 'enable' — continue with parallel, workers will force autoCommit
+          console.log('\nAuto-commit will be enabled for parallel workers.\n');
+        }
+      }
+    }
+
+    if (useParallel) {
+      // Parallel execution path
+      let maxWorkers = typeof options.parallel === 'number'
+        ? options.parallel
+        : storedConfig?.parallel?.maxWorkers ?? 3;
+
+      // Apply smart parallelism heuristics to adjust worker count
+      if (taskGraphAnalysis) {
+        const heuristics = recommendParallelism(actionableTasks, taskGraphAnalysis, maxWorkers);
+
+        if (heuristics.recommendedWorkers < maxWorkers && heuristics.confidence !== 'low') {
+          if (!config.showTui) {
+            console.log(`📊 Smart heuristics: ${heuristics.reason}`);
+            console.log(`   Adjusting workers: ${maxWorkers} → ${heuristics.recommendedWorkers}`);
+          }
+          maxWorkers = heuristics.recommendedWorkers;
+        }
+      }
+
+      // Resolve directMerge: CLI flag takes precedence over config
+      const directMerge = options.directMerge ?? storedConfig?.parallel?.directMerge ?? false;
+
+      // Get filtered task IDs for ParallelExecutor (if --task-range was used)
+      const filteredTaskIds = options.taskRange
+        ? actionableTasks.map((t) => t.id)
+        : undefined;
+
+      const parallelExecutor = new ParallelExecutor(config, tracker, {
+        maxWorkers,
+        worktreeDir: storedConfig?.parallel?.worktreeDir,
+        directMerge,
+        filteredTaskIds,
+      });
+
+      // Wire up AI conflict resolution if enabled (default: true)
+      const conflictResolutionEnabled = storedConfig?.conflictResolution?.enabled !== false;
+      if (conflictResolutionEnabled) {
+        // Pass conflict resolution config to RalphConfig for the resolver
+        const configWithConflictRes = {
+          ...config,
+          conflictResolution: storedConfig?.conflictResolution,
+        };
+        parallelExecutor.setAiResolver(createAiResolver(configWithConflictRes));
+      }
+
+      // Track session branch info for completion guidance
+      let sessionBranchForGuidance: string | null = null;
+      let originalBranchForGuidance: string | null = null;
+
+      if (config.showTui) {
+        // Parallel TUI mode — visualize workers, merges, and conflicts
+        persistedState = await runParallelWithTui(
+          parallelExecutor, persistedState, config, tasks, storedConfig
+        );
+        // Get branch info after execution completes
+        sessionBranchForGuidance = parallelExecutor.getSessionBranch();
+        originalBranchForGuidance = parallelExecutor.getOriginalBranch();
+      } else {
+        // Parallel headless mode — log events to console
+        parallelExecutor.on((event) => {
+          const time = new Date(event.timestamp).toLocaleTimeString();
+          switch (event.type) {
+            case 'parallel:started':
+              console.log(`[${time}] [INFO] [parallel] Parallel execution started: ${event.totalTasks} tasks, ${event.totalGroups} groups, ${event.maxWorkers} workers`);
+              break;
+            case 'parallel:session-branch-created':
+              console.log(`[${time}] [INFO] [parallel] Session branch created: ${event.sessionBranch} (from ${event.originalBranch})`);
+              break;
+            case 'parallel:group-started':
+              console.log(`[${time}] [INFO] [parallel] Group ${event.groupIndex + 1}/${event.totalGroups} started: ${event.workerCount} workers`);
+              break;
+            case 'worker:started':
+              console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} started: ${event.task.title}`);
+              // Mark task as active in persisted session state
+              persistedState = addActiveTask(persistedState, event.task.id);
+              savePersistedSession(persistedState).catch(() => {});
+              break;
+            case 'worker:completed':
+              console.log(`[${time}] [INFO] [worker] Worker ${event.workerId} completed: ${event.result.task.title}`);
+              // Remove task from active list in persisted session state
+              persistedState = removeActiveTask(persistedState, event.result.task.id);
+              savePersistedSession(persistedState).catch(() => {});
+              break;
+            case 'worker:failed':
+              console.log(`[${time}] [ERROR] [worker] Worker ${event.workerId} failed: ${event.error}`);
+              // Remove task from active list in persisted session state
+              persistedState = removeActiveTask(persistedState, event.task.id);
+              savePersistedSession(persistedState).catch(() => {});
+              break;
+            case 'merge:completed':
+              console.log(`[${time}] [INFO] [merge] Merge completed: ${event.result.strategy} (${event.result.filesChanged} files)`);
+              break;
+            case 'merge:failed':
+              console.log(`[${time}] [ERROR] [merge] Merge failed: ${event.error}`);
+              break;
+            case 'parallel:completed':
+              console.log(`[${time}] [INFO] [parallel] Parallel execution completed: ${event.totalTasksCompleted} tasks, ${event.totalMergesCompleted} merges, ${event.durationMs}ms`);
+              break;
+            case 'parallel:failed':
+              console.log(`[${time}] [ERROR] [parallel] Parallel execution failed: ${event.error}`);
+              break;
+          }
+        });
+
+        // Signal handlers for graceful shutdown in parallel headless mode
+        const handleParallelSignal = async (): Promise<void> => {
+          console.log('\n[INFO] [parallel] Received signal, stopping parallel execution...');
+
+          // Stop the parallel executor
+          await parallelExecutor.stop();
+
+          // Reset any in_progress tasks back to open
+          const activeTasks = getActiveTasks(persistedState);
+          if (activeTasks.length > 0) {
+            console.log(`[INFO] [parallel] Resetting ${activeTasks.length} in_progress task(s) to open...`);
+            for (const taskId of activeTasks) {
+              try {
+                await tracker.updateTaskStatus(taskId, 'open');
+              } catch {
+                // Best effort reset
+              }
+            }
+            persistedState = clearActiveTasks(persistedState);
+          }
+
+          // Save interrupted state
+          persistedState = { ...persistedState, status: 'interrupted' };
+          await savePersistedSession(persistedState);
+
+          process.exit(0);
+        };
+
+        process.on('SIGINT', handleParallelSignal);
+        process.on('SIGTERM', handleParallelSignal);
+
+        try {
+          await parallelExecutor.execute();
+          // Get branch info after execution completes
+          sessionBranchForGuidance = parallelExecutor.getSessionBranch();
+          originalBranchForGuidance = parallelExecutor.getOriginalBranch();
+        } finally {
+          // Remove handlers after execution completes
+          process.removeListener('SIGINT', handleParallelSignal);
+          process.removeListener('SIGTERM', handleParallelSignal);
+        }
+      }
+
+      // Show completion guidance if a session branch was created
+      if (sessionBranchForGuidance && originalBranchForGuidance) {
+        console.log('');
+        console.log('═══════════════════════════════════════════════════════════════');
+        console.log('                   Session Complete!                            ');
+        console.log('═══════════════════════════════════════════════════════════════');
+        console.log('');
+        console.log(`  Changes are on branch: ${sessionBranchForGuidance}`);
+        console.log(`  You are now on branch: ${originalBranchForGuidance}`);
+        console.log('');
+        console.log('  Next steps:');
+        console.log('');
+        console.log(`    To merge to ${originalBranchForGuidance}:`);
+        console.log(`      git merge ${sessionBranchForGuidance}`);
+        console.log('');
+        console.log('    To create a PR:');
+        console.log(`      git push -u origin ${sessionBranchForGuidance}`);
+        console.log(`      gh pr create --head ${sessionBranchForGuidance}`);
+        console.log('');
+        console.log('    To discard all changes:');
+        console.log(`      git branch -D ${sessionBranchForGuidance}`);
+        console.log('');
+        console.log('═══════════════════════════════════════════════════════════════');
+        console.log('');
+      }
+
+      // Set parallel completion state for final check
+      const pState = parallelExecutor.getState();
+      parallelAllComplete = pState.totalTasksCompleted >= pState.totalTasks || pState.status === 'completed';
+    } else if (config.showTui) {
+      // Sequential TUI mode (existing path)
       // Pass tasks for initial TUI display in "ready" state
       // Also pass storedConfig for settings view
       persistedState = await runWithTui(engine, persistedState, config, tasks, storedConfig, notificationRunOptions);
     } else {
-      // Headless mode still auto-starts (for CI/automation)
+      // Sequential headless mode (existing path)
       persistedState = await runHeadless(engine, persistedState, config, {
         notificationOptions: notificationRunOptions,
         listenMode: options.listen,
@@ -1876,6 +3007,8 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     // Save failed state
     persistedState = failSession(persistedState);
     await savePersistedSession(persistedState);
+    // Update registry status to failed
+    await updateRegistryStatus(session.id, 'failed');
     await endSession(config.cwd, 'failed');
     await releaseLockNew(config.cwd);
     cleanupLockHandlers();
@@ -1884,8 +3017,11 @@ export async function executeRunCommand(args: string[]): Promise<void> {
 
   // Check if all tasks completed successfully
   const finalState = engine.getState();
-  const allComplete = finalState.tasksCompleted >= finalState.totalTasks ||
-    finalState.status === 'idle';
+  const allComplete = isSessionComplete(
+    parallelAllComplete,
+    finalState.tasksCompleted,
+    finalState.totalTasks
+  );
 
   if (allComplete) {
     // Mark as completed and clean up session file
@@ -1893,10 +3029,14 @@ export async function executeRunCommand(args: string[]): Promise<void> {
     await savePersistedSession(persistedState);
     // Delete session file on successful completion
     await deletePersistedSession(config.cwd);
+    // Remove from registry on completion
+    await unregisterSession(session.id);
     console.log('\nSession completed successfully. Session file cleaned up.');
   } else {
     // Save current state (session remains resumable)
     await savePersistedSession(persistedState);
+    // Update registry with current status
+    await updateRegistryStatus(session.id, persistedState.status);
     console.log('\nSession state saved. Use "ralph-tui resume" to continue.');
   }
 

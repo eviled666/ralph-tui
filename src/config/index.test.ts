@@ -689,7 +689,7 @@ describe('validateConfig', () => {
     expect(result.errors.some((e) => e.includes('delay'))).toBe(true);
   });
 
-  test('warns about missing epic ID for beads tracker', async () => {
+  test('warns about missing epic ID for beads tracker in TUI mode', async () => {
     const config: RalphConfig = {
       agent: { name: 'claude', plugin: 'claude', options: {} },
       tracker: { name: 'beads-bv', plugin: 'beads-bv', options: {} },
@@ -710,6 +710,55 @@ describe('validateConfig', () => {
     const result = await validateConfig(config);
     expect(result.valid).toBe(true);
     expect(result.warnings.some((w) => w.includes('epic'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('interactive epic selection'))).toBe(true);
+  });
+
+  test('warns about missing epic ID for beads-rust tracker in TUI mode', async () => {
+    const config: RalphConfig = {
+      agent: { name: 'claude', plugin: 'claude', options: {} },
+      tracker: { name: 'beads-rust', plugin: 'beads-rust', options: {} },
+      maxIterations: 10,
+      iterationDelay: 1000,
+      cwd: process.cwd(),
+      outputDir: '.ralph-tui/iterations',
+      progressFile: '.ralph-tui/progress.md',
+      showTui: true,
+      errorHandling: {
+        strategy: 'skip',
+        maxRetries: 3,
+        retryDelayMs: 5000,
+        continueOnNonZeroExit: false,
+      },
+    };
+
+    const result = await validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes('epic'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('interactive epic selection'))).toBe(true);
+  });
+
+  test('warns about missing epic ID for beads tracker in headless mode', async () => {
+    const config: RalphConfig = {
+      agent: { name: 'claude', plugin: 'claude', options: {} },
+      tracker: { name: 'beads', plugin: 'beads', options: {} },
+      maxIterations: 10,
+      iterationDelay: 1000,
+      cwd: process.cwd(),
+      outputDir: '.ralph-tui/iterations',
+      progressFile: '.ralph-tui/progress.md',
+      showTui: false,
+      errorHandling: {
+        strategy: 'skip',
+        maxRetries: 3,
+        retryDelayMs: 5000,
+        continueOnNonZeroExit: false,
+      },
+    };
+
+    const result = await validateConfig(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w) => w.includes('headless'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('no interactive epic selection'))).toBe(true);
   });
 
   test('reports warning for json tracker without prdPath (TUI will prompt)', async () => {
@@ -815,5 +864,124 @@ default = true
 
     expect(config).not.toBeNull();
     expect(config!.agent.command).toBe('my-custom-claude');
+  });
+});
+
+describe('buildConfig - envPassthrough shorthand', () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir();
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  test('applies top-level envPassthrough to default agent', async () => {
+    const projectConfigDir = join(tempDir, '.ralph-tui');
+    await mkdir(projectConfigDir, { recursive: true });
+    await writeFile(
+      join(projectConfigDir, 'config.toml'),
+      `
+agent = "claude"
+tracker = "beads-bv"
+envPassthrough = ["ANTHROPIC_API_KEY"]
+`,
+      'utf-8'
+    );
+
+    const config = await buildConfig({ cwd: tempDir });
+
+    expect(config).not.toBeNull();
+    expect(config!.agent.envPassthrough).toEqual(['ANTHROPIC_API_KEY']);
+  });
+
+  test('applies top-level envExclude to default agent', async () => {
+    const projectConfigDir = join(tempDir, '.ralph-tui');
+    await mkdir(projectConfigDir, { recursive: true });
+    await writeFile(
+      join(projectConfigDir, 'config.toml'),
+      `
+agent = "claude"
+tracker = "beads-bv"
+envExclude = ["*_TOKEN", "DATABASE_URL"]
+`,
+      'utf-8'
+    );
+
+    const config = await buildConfig({ cwd: tempDir });
+
+    expect(config).not.toBeNull();
+    expect(config!.agent.envExclude).toEqual(['*_TOKEN', 'DATABASE_URL']);
+  });
+
+  test('agent-level envPassthrough takes precedence over top-level', async () => {
+    const projectConfigDir = join(tempDir, '.ralph-tui');
+    await mkdir(projectConfigDir, { recursive: true });
+    await writeFile(
+      join(projectConfigDir, 'config.toml'),
+      `
+envPassthrough = ["SHOULD_NOT_BE_USED"]
+tracker = "beads-bv"
+
+[[agents]]
+name = "claude"
+plugin = "claude"
+default = true
+envPassthrough = ["AGENT_LEVEL_KEY"]
+`,
+      'utf-8'
+    );
+
+    const config = await buildConfig({ cwd: tempDir });
+
+    expect(config).not.toBeNull();
+    expect(config!.agent.envPassthrough).toEqual(['AGENT_LEVEL_KEY']);
+  });
+
+  test('top-level envPassthrough not applied if agent already has it set', async () => {
+    const projectConfigDir = join(tempDir, '.ralph-tui');
+    await mkdir(projectConfigDir, { recursive: true });
+    await writeFile(
+      join(projectConfigDir, 'config.toml'),
+      `
+envPassthrough = ["TOP_LEVEL_KEY"]
+tracker = "beads-bv"
+
+[[agents]]
+name = "custom-claude"
+plugin = "claude"
+default = true
+envPassthrough = ["AGENT_SPECIFIC_KEY"]
+`,
+      'utf-8'
+    );
+
+    const config = await buildConfig({ cwd: tempDir });
+
+    expect(config).not.toBeNull();
+    expect(config!.agent.envPassthrough).toEqual(['AGENT_SPECIFIC_KEY']);
+  });
+
+  test('applies both envExclude and envPassthrough shorthands', async () => {
+    const projectConfigDir = join(tempDir, '.ralph-tui');
+    await mkdir(projectConfigDir, { recursive: true });
+    await writeFile(
+      join(projectConfigDir, 'config.toml'),
+      `
+agent = "claude"
+tracker = "beads-bv"
+envExclude = ["*_TOKEN"]
+envPassthrough = ["MY_API_KEY"]
+`,
+      'utf-8'
+    );
+
+    const config = await buildConfig({ cwd: tempDir });
+
+    expect(config).not.toBeNull();
+    expect(config!.agent.envExclude).toEqual(['*_TOKEN']);
+    expect(config!.agent.envPassthrough).toEqual(['MY_API_KEY']);
   });
 });

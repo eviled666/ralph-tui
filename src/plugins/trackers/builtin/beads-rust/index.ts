@@ -5,11 +5,11 @@
  */
 
 import { spawn } from 'node:child_process';
-import { constants, readFileSync } from 'node:fs';
+import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
-import { join, dirname, resolve, relative, isAbsolute } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve, relative, isAbsolute, join } from 'node:path';
 import { BaseTrackerPlugin } from '../../base.js';
+import { BEADS_RUST_TEMPLATE } from '../../../../templates/builtin.js';
 import type {
   SyncResult,
   TaskCompletionResult,
@@ -21,15 +21,6 @@ import type {
   TrackerTaskStatus,
 } from '../../types.js';
 
-/**
- * Get the directory containing this module (for locating template.hbs).
- */
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-/**
- * Cache for the template content to avoid repeated file reads.
- */
-let templateCache: string | null = null;
 
 /**
  * Raw task structure from br list --json output.
@@ -56,14 +47,30 @@ interface BrTaskJson {
     id: string;
     title: string;
     status: string;
-    dependency_type: 'blocks' | 'parent-child';
+    /** br serializes dep_type as "type" via serde rename */
+    type: 'blocks' | 'parent-child';
   }>;
   dependents?: Array<{
     id: string;
     title: string;
     status: string;
-    dependency_type: 'blocks' | 'parent-child';
+    /** br serializes dep_type as "type" via serde rename */
+    type: 'blocks' | 'parent-child';
   }>;
+}
+
+/**
+ * Output structure from br dep list --json.
+ * Used to query parent-child relationships reliably.
+ */
+interface BrDepListItem {
+  issue_id: string;
+  depends_on_id: string;
+  /** br serializes dep_type as "type" via serde rename */
+  type: 'blocks' | 'parent-child';
+  title: string;
+  status: string;
+  priority: number;
 }
 
 /**
@@ -173,7 +180,7 @@ function brTaskToTask(task: BrTaskJson): TrackerTask {
 
   if (task.dependencies) {
     for (const dep of task.dependencies) {
-      if (dep.dependency_type === 'blocks') {
+      if (dep.type === 'blocks') {
         dependsOn.push(dep.id);
       }
     }
@@ -181,7 +188,7 @@ function brTaskToTask(task: BrTaskJson): TrackerTask {
 
   if (task.dependents) {
     for (const dep of task.dependents) {
-      if (dep.dependency_type === 'blocks') {
+      if (dep.type === 'blocks') {
         blocks.push(dep.id);
       }
     }
@@ -320,7 +327,7 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
 
   override async getTasks(filter?: TaskFilter): Promise<TrackerTask[]> {
     // Always include closed tasks; UI controls visibility.
-    const args = ['list', '--json', '--all'];
+    const args = ['list', '--json', '--all', '--limit', '0'];
 
     // Note: br list doesn't support --parent, so we filter in-memory below
     const parentId = filter?.parentId ?? this.epicId;
@@ -375,7 +382,7 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
    * Queries for tasks with type='epic' and filters to top-level open/in_progress only.
    */
   override async getEpics(): Promise<TrackerTask[]> {
-    const args = ['list', '--json', '--type', 'epic'];
+    const args = ['list', '--json', '--type', 'epic', '--limit', '0'];
 
     if (this.labels.length > 0) {
       args.push('--label', this.labels.join(','));
@@ -438,11 +445,12 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
    */
   /**
    * Get child IDs for a parent epic/task.
-   * Uses br show to get dependents with parent-child relationship.
+   * Uses br dep list --direction up to get issues that depend on the parent
+   * with a parent-child relationship (i.e., children of the epic).
    */
   private async getChildIds(parentId: string): Promise<Set<string>> {
     const { stdout, exitCode } = await execBr(
-      ['show', parentId, '--json'],
+      ['dep', 'list', parentId, '--direction', 'up', '--json'],
       this.workingDir
     );
 
@@ -451,20 +459,12 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
     }
 
     try {
-      const tasks = JSON.parse(stdout) as BrTaskJson[];
-      if (tasks.length === 0) {
-        return new Set();
-      }
-
-      const task = tasks[0]!;
+      const deps = JSON.parse(stdout) as BrDepListItem[];
       const childIds = new Set<string>();
 
-      // dependents with dep_type 'parent-child' are children
-      if (task.dependents) {
-        for (const dep of task.dependents) {
-          if (dep.dependency_type === 'parent-child') {
-            childIds.add(dep.id);
-          }
+      for (const dep of deps) {
+        if (dep.type === 'parent-child') {
+          childIds.add(dep.issue_id);
         }
       }
 
@@ -693,7 +693,7 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
 
       if (epic.dependents) {
         const children = epic.dependents.filter(
-          (d) => d.dependency_type === 'parent-child'
+          (d) => d.type === 'parent-child'
         );
         totalCount = children.length;
         completedCount = children.filter(
@@ -715,28 +715,11 @@ export class BeadsRustTrackerPlugin extends BaseTrackerPlugin {
 
   /**
    * Get the prompt template for the beads-rust tracker.
-   * Reads from the co-located template.hbs file.
+   * Returns the embedded template to avoid path resolution issues in bundled environments.
+   * See: https://github.com/subsy/ralph-tui/issues/248
    */
   override getTemplate(): string {
-    if (templateCache !== null) {
-      return templateCache;
-    }
-
-    const templatePath = join(__dirname, 'template.hbs');
-    try {
-      templateCache = readFileSync(templatePath, 'utf-8');
-      return templateCache;
-    } catch (err) {
-      console.error(`Failed to read template from ${templatePath}:`, err);
-      return `## Task: {{taskTitle}}
-{{#if taskDescription}}
-{{taskDescription}}
-{{/if}}
-
-When finished, signal completion with:
-<promise>COMPLETE</promise>
-`;
-    }
+    return BEADS_RUST_TEMPLATE;
   }
 }
 

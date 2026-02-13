@@ -13,7 +13,12 @@ import {
 
 // Import the module to test internal functions via a workaround
 // We'll test the public interface and behavior
-import { BaseAgentPlugin } from './base.js';
+import {
+  BaseAgentPlugin,
+  DEFAULT_ENV_EXCLUDE_PATTERNS,
+  getEnvExclusionReport,
+  formatEnvExclusionReport,
+} from './base.js';
 import type {
   AgentPluginMeta,
   AgentFileContext,
@@ -305,394 +310,214 @@ describe('BaseAgentPlugin', () => {
 });
 
 /**
- * Test plugin that uses the real execute method for testing lifecycle hooks.
- * Uses 'cmd /c echo' on Windows and 'echo' on other platforms.
+ * Tests for BaseAgentPlugin execute lifecycle (onStdout, onEnd, onStart callbacks)
+ * and envExclude functionality that require real process execution are located in
+ * tests/plugins/agents/base-execute.test.ts. Those tests use Bun.spawn directly
+ * to avoid mock pollution from test files that mock node:child_process, because
+ * Bun's mock.restore() does not reliably restore builtin modules.
+ *
+ * See: https://github.com/oven-sh/bun/issues/7823
  */
-class RealExecuteTestPlugin extends BaseAgentPlugin {
-  readonly meta: AgentPluginMeta = {
-    id: 'real-execute-test',
-    name: 'Real Execute Test',
-    description: 'Test plugin using real execute method',
-    version: '1.0.0',
-    author: 'Test',
-    defaultCommand: process.platform === 'win32' ? 'cmd' : 'echo',
-    supportsStreaming: true,
-    supportsInterrupt: true,
-    supportsFileContext: false,
-    supportsSubagentTracing: false,
-  };
 
-  protected buildArgs(
-    prompt: string,
-    _files?: AgentFileContext[],
-    _options?: AgentExecuteOptions
-  ): string[] {
-    // On Windows: cmd /c echo <prompt>
-    // On Unix: echo (command) with prompt as arg
-    if (process.platform === 'win32') {
-      return ['/c', 'echo', prompt];
-    }
-    return [prompt];
-  }
+describe('BaseAgentPlugin envExclude (unit tests)', () => {
+  describe('getEnvExclusionReport', () => {
+    test('reports blocked vars that match default patterns', () => {
+      const testEnv: NodeJS.ProcessEnv = {
+        ANTHROPIC_API_KEY: 'key1',
+        OPENAI_API_KEY: 'key2',
+        DB_SECRET: 'sec1',
+        AWS_SECRET_KEY: 'sec2',
+        SAFE_VAR: 'safe',
+        HOME: '/home/user',
+      };
 
-  override async detect(): Promise<AgentDetectResult> {
-    return {
-      available: true,
-      version: '1.0.0',
-      executablePath: this.meta.defaultCommand,
-    };
-  }
-}
+      const report = getEnvExclusionReport(testEnv);
 
-describe('BaseAgentPlugin execute lifecycle', () => {
-  let agent: RealExecuteTestPlugin;
-
-  beforeEach(() => {
-    agent = new RealExecuteTestPlugin();
-  });
-
-  afterEach(async () => {
-    await agent.dispose();
-  });
-
-  describe('onEnd lifecycle hook', () => {
-    test('calls onEnd with execution result when process completes', async () => {
-      await agent.initialize({});
-
-      let onEndCalled = false;
-      let receivedResult: unknown = null;
-
-      const handle = agent.execute('test-output', [], {
-        onEnd: (result) => {
-          onEndCalled = true;
-          receivedResult = result;
-        },
-      });
-
-      const result = await handle.promise;
-
-      expect(result.status).toBe('completed');
-      expect(onEndCalled).toBe(true);
-      expect(receivedResult).not.toBeNull();
-      expect((receivedResult as { executionId: string }).executionId).toBe(result.executionId);
+      expect(report.blocked).toContain('ANTHROPIC_API_KEY');
+      expect(report.blocked).toContain('OPENAI_API_KEY');
+      expect(report.blocked).toContain('DB_SECRET');
+      expect(report.blocked).toContain('AWS_SECRET_KEY');
+      expect(report.blocked).not.toContain('SAFE_VAR');
+      expect(report.blocked).not.toContain('HOME');
+      expect(report.allowed).toHaveLength(0);
     });
 
-    test('resolves promise even when onEnd throws', async () => {
-      await agent.initialize({});
+    test('reports allowed vars when passthrough is configured', () => {
+      const testEnv: NodeJS.ProcessEnv = {
+        ANTHROPIC_API_KEY: 'key1',
+        OPENAI_API_KEY: 'key2',
+        DB_SECRET: 'sec1',
+      };
 
-      const handle = agent.execute('test-output', [], {
-        onEnd: () => {
-          throw new Error('onEnd hook intentionally threw');
-        },
-      });
+      const report = getEnvExclusionReport(testEnv, ['ANTHROPIC_API_KEY']);
 
-      // Should NOT reject, should still resolve
-      const result = await handle.promise;
-
-      expect(result.status).toBe('completed');
-      expect(result.exitCode).toBe(0);
+      expect(report.blocked).toContain('OPENAI_API_KEY');
+      expect(report.blocked).toContain('DB_SECRET');
+      expect(report.blocked).not.toContain('ANTHROPIC_API_KEY');
+      expect(report.allowed).toContain('ANTHROPIC_API_KEY');
     });
 
-    test('executes without onEnd callback', async () => {
-      await agent.initialize({});
+    test('supports glob patterns in passthrough', () => {
+      const testEnv: NodeJS.ProcessEnv = {
+        ANTHROPIC_API_KEY: 'key1',
+        OPENAI_API_KEY: 'key2',
+        MY_SECRET: 'sec1',
+      };
 
-      // Execute without onEnd - should not throw
-      const handle = agent.execute('test-output', [], {});
+      const report = getEnvExclusionReport(testEnv, ['*_API_KEY']);
 
-      const result = await handle.promise;
+      expect(report.allowed).toContain('ANTHROPIC_API_KEY');
+      expect(report.allowed).toContain('OPENAI_API_KEY');
+      expect(report.blocked).toContain('MY_SECRET');
+    });
 
-      expect(result.status).toBe('completed');
+    test('includes additional exclude patterns in report', () => {
+      const testEnv: NodeJS.ProcessEnv = {
+        CUSTOM_VAR: 'val',
+        ANTHROPIC_API_KEY: 'key1',
+      };
+
+      const report = getEnvExclusionReport(testEnv, [], ['CUSTOM_VAR']);
+
+      expect(report.blocked).toContain('CUSTOM_VAR');
+      expect(report.blocked).toContain('ANTHROPIC_API_KEY');
+    });
+
+    test('returns sorted arrays', () => {
+      const testEnv: NodeJS.ProcessEnv = {
+        ZEBRA_API_KEY: 'z',
+        ALPHA_API_KEY: 'a',
+        MY_SECRET: 'm',
+      };
+
+      const report = getEnvExclusionReport(testEnv);
+
+      expect(report.blocked).toEqual(['ALPHA_API_KEY', 'MY_SECRET', 'ZEBRA_API_KEY']);
+    });
+
+    test('returns empty arrays when no matches', () => {
+      const testEnv: NodeJS.ProcessEnv = {
+        HOME: '/home/user',
+        PATH: '/usr/bin',
+      };
+
+      const report = getEnvExclusionReport(testEnv);
+
+      expect(report.blocked).toHaveLength(0);
+      expect(report.allowed).toHaveLength(0);
     });
   });
 
-  describe('onStdout callback', () => {
-    test('calls onStdout with process output', async () => {
-      await agent.initialize({});
+  describe('formatEnvExclusionReport', () => {
+    test('shows blocked vars', () => {
+      const report = { blocked: ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'], allowed: [] };
+      const lines = formatEnvExclusionReport(report);
 
-      let stdoutData = '';
+      expect(lines).toContain('Env filter:');
+      expect(lines.some(l => l.includes('Blocked:') && l.includes('ANTHROPIC_API_KEY'))).toBe(true);
+    });
 
-      const handle = agent.execute('hello-world', [], {
-        onStdout: (data) => {
-          stdoutData += data;
-        },
-      });
+    test('shows allowed vars', () => {
+      const report = { blocked: ['OPENAI_API_KEY'], allowed: ['ANTHROPIC_API_KEY'] };
+      const lines = formatEnvExclusionReport(report);
 
-      await handle.promise;
+      expect(lines).toContain('Env filter:');
+      expect(lines.some(l => l.includes('Passthrough:') && l.includes('ANTHROPIC_API_KEY'))).toBe(true);
+      expect(lines.some(l => l.includes('Blocked:') && l.includes('OPENAI_API_KEY'))).toBe(true);
+    });
 
-      expect(stdoutData).toContain('hello-world');
+    test('shows "no vars matched" when both arrays are empty', () => {
+      const report = { blocked: [], allowed: [] };
+      const lines = formatEnvExclusionReport(report);
+
+      expect(lines.length).toBeGreaterThan(0);
+      expect(lines.some(l => l.includes('no vars matched exclusion patterns'))).toBe(true);
+      expect(lines.some(l => l.includes('*_API_KEY'))).toBe(true);
+    });
+
+    test('always returns non-empty array', () => {
+      const emptyReport = { blocked: [], allowed: [] };
+      const lines = formatEnvExclusionReport(emptyReport);
+      expect(lines.length).toBeGreaterThan(0);
+    });
+
+    test('shows only blocked when no passthrough configured', () => {
+      const report = { blocked: ['MY_SECRET'], allowed: [] };
+      const lines = formatEnvExclusionReport(report);
+
+      expect(lines.some(l => l.includes('Blocked:'))).toBe(true);
+      expect(lines.some(l => l.includes('Passthrough:'))).toBe(false);
+    });
+
+    test('shows only passthrough when all blocked vars are allowed', () => {
+      const report = { blocked: [], allowed: ['ANTHROPIC_API_KEY'] };
+      const lines = formatEnvExclusionReport(report);
+
+      expect(lines.some(l => l.includes('Passthrough:'))).toBe(true);
+      expect(lines.some(l => l.includes('Blocked:'))).toBe(false);
     });
   });
 
-  describe('onStart callback', () => {
-    test('calls onStart with execution ID', async () => {
-      await agent.initialize({});
-
-      let startExecutionId = '';
-
-      const handle = agent.execute('test', [], {
-        onStart: (execId) => {
-          startExecutionId = execId;
-        },
-      });
-
-      const result = await handle.promise;
-
-      expect(startExecutionId).not.toBe('');
-      expect(startExecutionId).toBe(result.executionId);
-    });
-  });
-});
-
-/**
- * Test plugin that prints environment variables for testing envExclude.
- * Uses 'printenv' on Unix or 'set' on Windows to list environment variables.
- */
-class EnvTestPlugin extends BaseAgentPlugin {
-  readonly meta: AgentPluginMeta = {
-    id: 'env-test',
-    name: 'Env Test',
-    description: 'Test plugin for environment variable filtering',
-    version: '1.0.0',
-    author: 'Test',
-    defaultCommand: process.platform === 'win32' ? 'cmd' : 'printenv',
-    supportsStreaming: true,
-    supportsInterrupt: true,
-    supportsFileContext: false,
-    supportsSubagentTracing: false,
-  };
-
-  protected buildArgs(
-    prompt: string,
-    _files?: AgentFileContext[],
-    _options?: AgentExecuteOptions
-  ): string[] {
-    // On Windows: cmd /c set <VARNAME>
-    // On Unix: printenv <VARNAME>
-    if (process.platform === 'win32') {
-      return ['/c', 'set', prompt];
-    }
-    return [prompt];
-  }
-
-  override async detect(): Promise<AgentDetectResult> {
-    return {
-      available: true,
-      version: '1.0.0',
-      executablePath: this.meta.defaultCommand,
-    };
-  }
-}
-
-describe('BaseAgentPlugin envExclude', () => {
-  describe('initialize with envExclude', () => {
-    test('stores envExclude patterns from config', async () => {
-      const agent = new EnvTestPlugin();
+  describe('BaseAgentPlugin.getExclusionReport', () => {
+    test('returns report using agent passthrough config', async () => {
+      const agent = new TestAgentPlugin();
       await agent.initialize({
-        envExclude: ['API_KEY', '*_SECRET'],
+        envPassthrough: ['TEST_API_KEY'],
       });
 
-      // We can verify this by checking the agent is ready
-      // The actual filtering is tested in execute tests
-      await expect(agent.isReady()).resolves.toBe(true);
-      await agent.dispose();
-    });
+      const origApiKey = process.env.TEST_API_KEY;
+      const origSecret = process.env.TEST_SECRET;
+      process.env.TEST_API_KEY = 'val1';
+      process.env.TEST_SECRET = 'val2';
 
-    test('handles empty envExclude array', async () => {
-      const agent = new EnvTestPlugin();
-      await agent.initialize({
-        envExclude: [],
-      });
+      const report = agent.getExclusionReport();
 
-      await expect(agent.isReady()).resolves.toBe(true);
-      await agent.dispose();
-    });
+      expect(report.allowed).toContain('TEST_API_KEY');
+      expect(report.blocked).toContain('TEST_SECRET');
 
-    test('filters out non-string values in envExclude', async () => {
-      const agent = new EnvTestPlugin();
-      await agent.initialize({
-        envExclude: ['VALID', 123, null, 'ALSO_VALID', ''],
-      });
-
-      await expect(agent.isReady()).resolves.toBe(true);
-      await agent.dispose();
-    });
-  });
-
-  describe('environment variable filtering during execute', () => {
-    test('excludes exact match environment variables', async () => {
-      const agent = new EnvTestPlugin();
-      await agent.initialize({
-        envExclude: ['TEST_EXCLUDE_VAR'],
-      });
-
-      // Set up test environment variable
-      const originalValue = process.env.TEST_EXCLUDE_VAR;
-      process.env.TEST_EXCLUDE_VAR = 'should_be_excluded';
-
-      let stdout = '';
-      const handle = agent.execute('TEST_EXCLUDE_VAR', [], {
-        onStdout: (data) => {
-          stdout += data;
-        },
-      });
-
-      await handle.promise;
-
-      // Clean up
-      if (originalValue === undefined) {
-        delete process.env.TEST_EXCLUDE_VAR;
-      } else {
-        process.env.TEST_EXCLUDE_VAR = originalValue;
-      }
-
-      await agent.dispose();
-
-      // The variable should NOT be in the output because it was excluded
-      // printenv returns empty/error for non-existent vars
-      expect(stdout).not.toContain('should_be_excluded');
-    });
-
-    test('excludes variables matching glob pattern with *', async () => {
-      const agent = new EnvTestPlugin();
-      await agent.initialize({
-        envExclude: ['TEST_*_PATTERN'],
-      });
-
-      // Set up test environment variable
-      const originalValue = process.env.TEST_GLOB_PATTERN;
-      process.env.TEST_GLOB_PATTERN = 'glob_excluded';
-
-      let stdout = '';
-      const handle = agent.execute('TEST_GLOB_PATTERN', [], {
-        onStdout: (data) => {
-          stdout += data;
-        },
-      });
-
-      await handle.promise;
-
-      // Clean up
-      if (originalValue === undefined) {
-        delete process.env.TEST_GLOB_PATTERN;
-      } else {
-        process.env.TEST_GLOB_PATTERN = originalValue;
-      }
-
-      await agent.dispose();
-
-      // The variable should NOT be in the output
-      expect(stdout).not.toContain('glob_excluded');
-    });
-
-    test('does not exclude variables that do not match patterns', async () => {
-      const agent = new EnvTestPlugin();
-      await agent.initialize({
-        envExclude: ['EXCLUDED_VAR'],
-      });
-
-      // Set up test environment variable that should NOT be excluded
-      const originalValue = process.env.TEST_KEPT_VAR;
-      process.env.TEST_KEPT_VAR = 'should_remain';
-
-      let stdout = '';
-      const handle = agent.execute('TEST_KEPT_VAR', [], {
-        onStdout: (data) => {
-          stdout += data;
-        },
-      });
-
-      await handle.promise;
-
-      // Clean up
-      if (originalValue === undefined) {
-        delete process.env.TEST_KEPT_VAR;
-      } else {
-        process.env.TEST_KEPT_VAR = originalValue;
-      }
-
-      await agent.dispose();
-
-      // The variable SHOULD be in the output
-      expect(stdout).toContain('should_remain');
-    });
-
-    test('excludes ANTHROPIC_API_KEY when configured', async () => {
-      const agent = new EnvTestPlugin();
-      await agent.initialize({
-        envExclude: ['ANTHROPIC_API_KEY'],
-      });
-
-      // Set up test environment variable
-      const originalValue = process.env.ANTHROPIC_API_KEY;
-      process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key';
-
-      let stdout = '';
-      const handle = agent.execute('ANTHROPIC_API_KEY', [], {
-        onStdout: (data) => {
-          stdout += data;
-        },
-      });
-
-      await handle.promise;
-
-      // Clean up
-      if (originalValue === undefined) {
-        delete process.env.ANTHROPIC_API_KEY;
-      } else {
-        process.env.ANTHROPIC_API_KEY = originalValue;
-      }
-
-      await agent.dispose();
-
-      // The API key should NOT be in the output
-      expect(stdout).not.toContain('sk-ant-test-key');
-    });
-
-    test('excludes multiple patterns with *_API_KEY and *_SECRET', async () => {
-      const agent = new EnvTestPlugin();
-      await agent.initialize({
-        envExclude: ['*_API_KEY', '*_SECRET'],
-      });
-
-      // Set up test environment variables
-      const origApiKey = process.env.MY_API_KEY;
-      const origSecret = process.env.DB_SECRET;
-      process.env.MY_API_KEY = 'my-api-key-value';
-      process.env.DB_SECRET = 'db-secret-value';
-
-      // Test MY_API_KEY is excluded
-      let stdout1 = '';
-      const handle1 = agent.execute('MY_API_KEY', [], {
-        onStdout: (data) => {
-          stdout1 += data;
-        },
-      });
-      await handle1.promise;
-      expect(stdout1).not.toContain('my-api-key-value');
-
-      // Test DB_SECRET is excluded
-      let stdout2 = '';
-      const handle2 = agent.execute('DB_SECRET', [], {
-        onStdout: (data) => {
-          stdout2 += data;
-        },
-      });
-      await handle2.promise;
-      expect(stdout2).not.toContain('db-secret-value');
-
-      // Clean up
       if (origApiKey === undefined) {
-        delete process.env.MY_API_KEY;
+        delete process.env.TEST_API_KEY;
       } else {
-        process.env.MY_API_KEY = origApiKey;
+        process.env.TEST_API_KEY = origApiKey;
       }
       if (origSecret === undefined) {
-        delete process.env.DB_SECRET;
+        delete process.env.TEST_SECRET;
       } else {
-        process.env.DB_SECRET = origSecret;
+        process.env.TEST_SECRET = origSecret;
       }
 
       await agent.dispose();
+    });
+
+    test('includes user envExclude in report', async () => {
+      const agent = new TestAgentPlugin();
+      await agent.initialize({
+        envExclude: ['CUSTOM_BLOCK'],
+      });
+
+      const origCustom = process.env.CUSTOM_BLOCK;
+      process.env.CUSTOM_BLOCK = 'blocked-val';
+
+      const report = agent.getExclusionReport();
+
+      expect(report.blocked).toContain('CUSTOM_BLOCK');
+
+      if (origCustom === undefined) {
+        delete process.env.CUSTOM_BLOCK;
+      } else {
+        process.env.CUSTOM_BLOCK = origCustom;
+      }
+
+      await agent.dispose();
+    });
+  });
+
+  describe('DEFAULT_ENV_EXCLUDE_PATTERNS', () => {
+    test('is exported and contains expected patterns', () => {
+      expect(DEFAULT_ENV_EXCLUDE_PATTERNS).toContain('*_API_KEY');
+      expect(DEFAULT_ENV_EXCLUDE_PATTERNS).toContain('*_SECRET_KEY');
+      expect(DEFAULT_ENV_EXCLUDE_PATTERNS).toContain('*_SECRET');
+      expect(DEFAULT_ENV_EXCLUDE_PATTERNS.length).toBeGreaterThanOrEqual(3);
     });
   });
 });

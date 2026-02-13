@@ -1,6 +1,7 @@
 /**
  * ABOUTME: Resume command for ralph-tui.
  * Continues execution from a previously interrupted or paused session.
+ * Supports cross-directory resume via session registry.
  */
 
 import { createCliRenderer } from '@opentui/core';
@@ -16,13 +17,24 @@ import {
   pauseSession,
   updateSessionAfterIteration,
   setSubagentPanelVisible,
+  addActiveTask,
+  removeActiveTask,
   acquireLock,
   releaseLock,
   checkSession,
   cleanStaleLock,
   checkLock,
   detectAndRecoverStaleSession,
+  listResumableSessions,
+  getSessionById,
+  getSessionByCwd,
+  findSessionsByPrefix,
+  updateRegistryStatus,
+  unregisterSession,
+  cleanupStaleRegistryEntries,
+  getRegistryFilePath,
   type PersistedSessionState,
+  type SessionRegistryEntry,
 } from '../session/index.js';
 import { buildConfig, validateConfig } from '../config/index.js';
 import type { RuntimeOptions } from '../config/types.js';
@@ -31,19 +43,57 @@ import { registerBuiltinAgents } from '../plugins/agents/builtin/index.js';
 import { registerBuiltinTrackers } from '../plugins/trackers/builtin/index.js';
 import { getAgentRegistry } from '../plugins/agents/registry.js';
 import { getTrackerRegistry } from '../plugins/trackers/registry.js';
+import type { TrackerTask } from '../plugins/trackers/types.js';
 import { RunApp } from '../tui/components/RunApp.js';
+
+/**
+ * Check if there's a mismatch between tracker state and session state.
+ *
+ * Returns true if the engine reports 0 tasks but the session has task history,
+ * indicating the tracker cannot find the expected tasks (e.g., wrong epicId,
+ * missing prdPath file, or database state mismatch).
+ *
+ * See: https://github.com/subsy/ralph-tui/issues/247
+ *
+ * @param engineTotalTasks - Number of tasks loaded by the tracker
+ * @param sessionTotalTasks - Number of tasks recorded in the session
+ * @returns true if a warning should be shown about tracker/session mismatch
+ */
+export function shouldWarnAboutTrackerMismatch(
+  engineTotalTasks: number,
+  sessionTotalTasks: number
+): boolean {
+  return engineTotalTasks === 0 && sessionTotalTasks > 0;
+}
+
+/**
+ * Parsed resume command arguments
+ */
+export interface ResumeArgs {
+  /** Working directory (overrides session registry) */
+  cwd: string;
+  /** Run in headless mode */
+  headless: boolean;
+  /** Force resume even if locked */
+  force: boolean;
+  /** List available sessions */
+  list: boolean;
+  /** Clean up stale registry entries */
+  cleanup: boolean;
+  /** Session ID to resume (can be partial prefix) */
+  sessionId?: string;
+}
 
 /**
  * Parse CLI arguments for the resume command
  */
-export function parseResumeArgs(args: string[]): {
-  cwd: string;
-  headless: boolean;
-  force: boolean;
-} {
+export function parseResumeArgs(args: string[]): ResumeArgs {
   let cwd = process.cwd();
   let headless = false;
   let force = false;
+  let list = false;
+  let cleanup = false;
+  let sessionId: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -64,10 +114,26 @@ export function parseResumeArgs(args: string[]): {
       case '--force':
         force = true;
         break;
+
+      case '--list':
+      case '-l':
+        list = true;
+        break;
+
+      case '--cleanup':
+        cleanup = true;
+        break;
+
+      default:
+        // Positional argument: session ID
+        if (!arg.startsWith('-') && !sessionId) {
+          sessionId = arg;
+        }
+        break;
     }
   }
 
-  return { cwd, headless, force };
+  return { cwd, headless, force, list, cleanup, sessionId };
 }
 
 /**
@@ -84,12 +150,168 @@ async function initializePlugins(): Promise<void> {
 }
 
 /**
+ * Format a session entry for display
+ */
+export function formatSessionEntry(entry: SessionRegistryEntry, index?: number): string {
+  const prefix = index !== undefined ? `${index + 1}. ` : '';
+  const shortId = entry.sessionId.slice(0, 8);
+  const statusIcon = entry.status === 'paused' ? '⏸' :
+                     entry.status === 'running' ? '▶' :
+                     entry.status === 'interrupted' ? '⚠' : '•';
+  const sandboxTag = entry.sandbox ? ' [sandbox]' : '';
+  const trackerInfo = entry.epicId ? `epic:${entry.epicId}` :
+                      entry.prdPath ? `prd:${entry.prdPath}` : entry.trackerPlugin;
+
+  return `${prefix}${statusIcon} ${shortId}  ${entry.status.padEnd(11)}  ${entry.agentPlugin.padEnd(10)}  ${trackerInfo}${sandboxTag}\n   ${entry.cwd}`;
+}
+
+/**
+ * List available resumable sessions
+ */
+export async function listSessions(): Promise<void> {
+  const sessions = await listResumableSessions();
+
+  if (sessions.length === 0) {
+    console.log('No resumable sessions found.');
+    console.log('');
+    console.log('Start a new session with: ralph-tui run');
+    return;
+  }
+
+  console.log('Resumable sessions:');
+  console.log('');
+  console.log('   ID        Status       Agent       Tracker');
+  console.log('   ─────────────────────────────────────────────────');
+
+  for (let i = 0; i < sessions.length; i++) {
+    console.log(formatSessionEntry(sessions[i], i));
+    console.log('');
+  }
+
+  console.log('To resume a session:');
+  console.log('  ralph-tui resume <session-id>    # Resume by ID (first 8 chars is enough)');
+  console.log('  ralph-tui resume                 # Resume session in current directory');
+}
+
+/**
+ * Clean up stale registry entries
+ */
+export async function cleanupRegistry(): Promise<void> {
+  console.log('Cleaning up stale session registry entries...');
+
+  const cleaned = await cleanupStaleRegistryEntries(hasPersistedSession);
+
+  if (cleaned === 0) {
+    console.log('No stale entries found.');
+  } else {
+    console.log(`Removed ${cleaned} stale session${cleaned !== 1 ? 's' : ''} from registry.`);
+  }
+
+  console.log(`Registry file: ${getRegistryFilePath()}`);
+}
+
+/**
+ * Resolve session to resume - either from session ID, current directory, or registry
+ */
+export async function resolveSession(args: ResumeArgs): Promise<{
+  cwd: string;
+  registryEntry?: SessionRegistryEntry;
+} | null> {
+  // If session ID provided, look it up in registry
+  if (args.sessionId) {
+    // Try exact match first
+    let entry = await getSessionById(args.sessionId);
+
+    // Try prefix match if exact match fails
+    if (!entry) {
+      const matches = await findSessionsByPrefix(args.sessionId);
+      if (matches.length === 1) {
+        entry = matches[0];
+      } else if (matches.length > 1) {
+        console.error(`Multiple sessions match prefix '${args.sessionId}':`);
+        console.error('');
+        for (const match of matches) {
+          console.error(`  ${match.sessionId.slice(0, 8)}  ${match.cwd}`);
+        }
+        console.error('');
+        console.error('Please provide a more specific session ID.');
+        return null;
+      }
+    }
+
+    if (!entry) {
+      console.error(`Session '${args.sessionId}' not found in registry.`);
+      console.error('');
+      console.error('Use "ralph-tui resume --list" to see available sessions.');
+      return null;
+    }
+
+    // Validate the session file still exists at the entry's cwd
+    const sessionFileExists = await hasPersistedSession(entry.cwd);
+    if (!sessionFileExists) {
+      console.error(`Session '${args.sessionId}' found in registry, but session file is missing.`);
+      console.error(`Expected session file at: ${entry.cwd}/.ralph-tui/session.json`);
+      console.error('');
+      console.error('The session file may have been deleted. Run --cleanup to update the registry.');
+      return null;
+    }
+
+    return { cwd: entry.cwd, registryEntry: entry };
+  }
+
+  // Check current directory for session
+  const hasSession = await hasPersistedSession(args.cwd);
+  if (hasSession) {
+    // Also try to get registry entry for this cwd
+    const registryEntry = await getSessionByCwd(args.cwd) ?? undefined;
+    return { cwd: args.cwd, registryEntry };
+  }
+
+  // No session in current directory - check registry for helpful suggestions
+  const registryEntry = await getSessionByCwd(args.cwd);
+  if (registryEntry) {
+    // Registry has an entry but session file is missing
+    console.error('Session file not found, but registry entry exists.');
+    console.error(`Expected session file at: ${args.cwd}/.ralph-tui/session.json`);
+    console.error('');
+    console.error('The session file may have been deleted. Run --cleanup to update the registry.');
+    return null;
+  }
+
+  // Check if there are any sessions available
+  const sessions = await listResumableSessions();
+
+  console.error('No session to resume in current directory.');
+  console.error(`Looked for session at: ${args.cwd}/.ralph-tui/session.json`);
+  console.error('');
+
+  if (sessions.length > 0) {
+    console.error('Available sessions in other directories:');
+    console.error('');
+    for (const session of sessions.slice(0, 3)) {
+      console.error(`  ${session.sessionId.slice(0, 8)}  ${session.cwd}`);
+    }
+    if (sessions.length > 3) {
+      console.error(`  ... and ${sessions.length - 3} more`);
+    }
+    console.error('');
+    console.error('Use "ralph-tui resume <session-id>" to resume a specific session.');
+    console.error('Use "ralph-tui resume --list" to see all sessions.');
+  } else {
+    console.error('Start a new session with: ralph-tui run');
+  }
+
+  return null;
+}
+
+/**
  * Run the execution engine with TUI (resume mode)
  */
 async function runWithTui(
   engine: ExecutionEngine,
   cwd: string,
   initialState: PersistedSessionState,
+  initialTasks: TrackerTask[],
   trackerType?: string,
   currentModel?: string
 ): Promise<PersistedSessionState> {
@@ -101,10 +323,26 @@ async function runWithTui(
 
   const root = createRoot(renderer);
 
-  // Subscribe to engine events to save state
+  // Subscribe to engine events to save state and track active tasks
   engine.on((event) => {
     if (event.type === 'iteration:completed') {
       currentState = updateSessionAfterIteration(currentState, event.result);
+      // If task was completed, remove it from active tasks
+      if (event.result.taskCompleted) {
+        currentState = removeActiveTask(currentState, event.result.task.id);
+      }
+      savePersistedSession(currentState).catch(() => {
+        // Log but don't fail on save errors
+      });
+    } else if (event.type === 'task:activated') {
+      // Track task as active when set to in_progress
+      currentState = addActiveTask(currentState, event.task.id);
+      savePersistedSession(currentState).catch(() => {
+        // Log but don't fail on save errors
+      });
+    } else if (event.type === 'task:completed') {
+      // Task completed - remove from active tasks
+      currentState = removeActiveTask(currentState, event.task.id);
       savePersistedSession(currentState).catch(() => {
         // Log but don't fail on save errors
       });
@@ -148,10 +386,21 @@ async function runWithTui(
     });
   };
 
+  let engineStarted = false;
+  const handleStart = async (): Promise<void> => {
+    if (engineStarted) return;
+    engineStarted = true;
+    // Start the engine in the background (this runs the loop)
+    engine.start().catch((error) => {
+      console.error('Engine error:', error);
+    });
+  };
+
   root.render(
     <RunApp
       engine={engine}
       cwd={cwd}
+      initialTasks={initialTasks}
       onQuit={async () => {
         // Save interrupted state
         currentState = { ...currentState, status: 'interrupted' };
@@ -159,6 +408,7 @@ async function runWithTui(
         await cleanup();
         process.exit(0);
       }}
+      onStart={handleStart}
       trackerType={trackerType}
       initialSubagentPanelVisible={initialState.subagentPanelVisible ?? false}
       onSubagentPanelVisibilityChange={handleSubagentPanelVisibilityChange}
@@ -166,9 +416,18 @@ async function runWithTui(
     />
   );
 
-  await engine.start();
-  await cleanup();
-  return currentState;
+  // Auto-start the engine after a short delay to let the TUI render
+  setTimeout(() => {
+    if (!engineStarted) {
+      handleStart();
+    }
+  }, 100);
+
+  // The engine runs in the background, TUI handles user interaction
+  // This function won't return until the process exits via onQuit or signal handlers
+  return new Promise<PersistedSessionState>(() => {
+    // Never resolves - process will exit via cleanup handlers
+  });
 }
 
 /**
@@ -265,16 +524,28 @@ export async function executeResumeCommand(args: string[]): Promise<void> {
     return;
   }
 
-  const { cwd, headless, force } = parseResumeArgs(args);
+  const parsedArgs = parseResumeArgs(args);
 
-  // Check for existing session
-  const hasSession = await hasPersistedSession(cwd);
-  if (!hasSession) {
-    console.error('No session to resume.');
-    console.error('');
-    console.error('Start a new session with: ralph-tui run');
+  // Handle --list
+  if (parsedArgs.list) {
+    await listSessions();
+    return;
+  }
+
+  // Handle --cleanup
+  if (parsedArgs.cleanup) {
+    await cleanupRegistry();
+    return;
+  }
+
+  // Resolve which session to resume
+  const resolved = await resolveSession(parsedArgs);
+  if (!resolved) {
     process.exit(1);
   }
+
+  const { cwd, registryEntry } = resolved;
+  const { headless, force } = parsedArgs;
 
   // Detect and recover stale sessions EARLY
   // This fixes the issue where killing the TUI mid-task leaves activeTaskIds populated
@@ -393,6 +664,24 @@ export async function executeResumeCommand(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Validate tracker state matches session expectations
+  const engineState = engine.getState();
+  const sessionTotalTasks = resumedState.trackerState.totalTasks;
+  if (shouldWarnAboutTrackerMismatch(engineState.totalTasks, sessionTotalTasks)) {
+    console.warn('\nWarning: Session has task history but tracker returned no tasks.');
+    console.warn('This may happen if:');
+    if (resumedState.trackerState.epicId) {
+      console.warn(`  - The epic ID "${resumedState.trackerState.epicId}" no longer exists`);
+    }
+    if (resumedState.trackerState.prdPath) {
+      console.warn(`  - The PRD file "${resumedState.trackerState.prdPath}" is missing or empty`);
+    }
+    console.warn('\nTo fix, provide the tracker source explicitly:');
+    console.warn('  ralph-tui run --prd <path-to-prd.json>');
+    console.warn('  ralph-tui run --epic <epic-id>');
+    console.warn('');
+  }
+
   // Restore engine state from persisted session
   // The engine will start fresh but the session tracks what was already done
   // Task statuses are read from the tracker which should be in sync
@@ -401,7 +690,17 @@ export async function executeResumeCommand(args: string[]): Promise<void> {
   let finalState: PersistedSessionState;
   try {
     if (!headless && config.showTui) {
-      finalState = await runWithTui(engine, cwd, resumedState, config.tracker.plugin, config.model);
+      // Load tasks from tracker (only for TUI mode to avoid unnecessary latency in headless)
+      let tasks: TrackerTask[] = [];
+      try {
+        const trackerRegistry = getTrackerRegistry();
+        const tracker = await trackerRegistry.getInstance(config.tracker);
+        tasks = await tracker.getTasks({ status: ['open', 'in_progress', 'completed'] });
+      } catch (error) {
+        console.error('Warning: Failed to load tasks:', error);
+      }
+
+      finalState = await runWithTui(engine, cwd, resumedState, tasks, config.tracker.plugin, config.model);
     } else {
       finalState = await runHeadless(engine, cwd, resumedState);
     }
@@ -417,10 +716,22 @@ export async function executeResumeCommand(args: string[]): Promise<void> {
   // Clean up session file on successful completion
   if (finalState.status === 'completed') {
     await deletePersistedSession(cwd);
+    // Remove from registry on completion
+    if (registryEntry) {
+      await unregisterSession(registryEntry.sessionId);
+    }
     console.log('Session completed and cleaned up.');
   } else if (finalState.status === 'paused') {
+    // Update registry status
+    if (registryEntry) {
+      await updateRegistryStatus(registryEntry.sessionId, 'paused');
+    }
     console.log('\nSession paused. Use "ralph-tui resume" to continue.');
   } else {
+    // Update registry with current status
+    if (registryEntry) {
+      await updateRegistryStatus(registryEntry.sessionId, finalState.status);
+    }
     console.log('\nSession state saved. Use "ralph-tui resume" to continue.');
   }
 
@@ -434,9 +745,15 @@ export function printResumeHelp(): void {
   console.log(`
 ralph-tui resume - Continue from a previous session
 
-Usage: ralph-tui resume [options]
+Usage: ralph-tui resume [session-id] [options]
+
+Arguments:
+  session-id        Session ID to resume (first 8 characters is enough)
+                    If not provided, resumes session in current directory
 
 Options:
+  --list, -l        List all resumable sessions
+  --cleanup         Remove stale entries from session registry
   --cwd <path>      Working directory (default: current directory)
   --headless        Run without TUI
   --force           Force resume even if another instance appears to be running
@@ -450,12 +767,19 @@ Description:
   - running: Crashed or interrupted unexpectedly
   - interrupted: Stopped by signal (Ctrl+C)
 
+  Cross-directory Resume:
+  Sessions are registered in a global registry (~/.config/ralph-tui/sessions.json)
+  allowing you to resume sessions from any directory using the session ID.
+
   Completed or failed sessions cannot be resumed. Use 'ralph-tui run --force'
   to start a new session.
 
 Examples:
   ralph-tui resume              # Resume session in current directory
+  ralph-tui resume --list       # List all resumable sessions
+  ralph-tui resume a1b2c3d4     # Resume session by ID (from any directory)
   ralph-tui resume --headless   # Resume without TUI
   ralph-tui resume --force      # Force resume (override stale lock)
+  ralph-tui resume --cleanup    # Clean up stale registry entries
 `);
 }

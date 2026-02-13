@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { BaseAgentPlugin, findCommandPath } from '../base.js';
+import { BaseAgentPlugin, findCommandPath, quoteForWindowsShell } from '../base.js';
 import type {
   AgentPluginMeta,
   AgentPluginFactory,
@@ -14,6 +14,12 @@ import type {
   AgentSetupQuestion,
   AgentDetectResult,
 } from '../types.js';
+
+/**
+ * Valid Kiro model names.
+ * Empty string means use default (Auto routing).
+ */
+const VALID_KIRO_MODELS = ['', 'claude-sonnet4', 'claude-sonnet4.5', 'claude-haiku4.5', 'claude-opus4.5'] as const;
 
 /**
  * Kiro CLI agent plugin implementation.
@@ -43,6 +49,7 @@ export class KiroAgentPlugin extends BaseAgentPlugin {
 
   private trustAllTools = true;
   private agent?: string;
+  private model?: string;
   protected override defaultTimeout = 0;
 
   override async initialize(config: Record<string, unknown>): Promise<void> {
@@ -54,6 +61,13 @@ export class KiroAgentPlugin extends BaseAgentPlugin {
 
     if (typeof config.agent === 'string' && config.agent.length > 0) {
       this.agent = config.agent;
+    }
+
+    if (typeof config.model === 'string') {
+      const model = config.model.trim();
+      if (model && !this.validateModel(model)) {
+        this.model = model;
+      }
     }
 
     if (typeof config.timeout === 'number' && config.timeout > 0) {
@@ -99,7 +113,7 @@ export class KiroAgentPlugin extends BaseAgentPlugin {
       // Use -V flag (the documented version flag for kiro-cli)
       // Only use shell on Windows where direct spawn may not work
       const useShell = process.platform === 'win32';
-      const proc = spawn(command, ['-V'], {
+      const proc = spawn(useShell ? quoteForWindowsShell(command) : command, ['-V'], {
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: useShell,
       });
@@ -138,7 +152,7 @@ export class KiroAgentPlugin extends BaseAgentPlugin {
       setTimeout(() => {
         proc.kill();
         resolve({ success: false, error: 'Timeout waiting for version' });
-      }, 5000);
+      }, 15000);
     });
   }
 
@@ -161,6 +175,21 @@ export class KiroAgentPlugin extends BaseAgentPlugin {
         required: false,
         help: 'Specific Kiro agent to use (leave empty for default)',
       },
+      {
+        id: 'model',
+        prompt: 'Model to use:',
+        type: 'select',
+        default: '',
+        required: false,
+        choices: [
+          { value: '', label: 'Auto', description: 'Intelligent model routing (recommended)' },
+          { value: 'claude-sonnet4', label: 'Claude Sonnet 4.0', description: 'Direct Sonnet 4.0 access' },
+          { value: 'claude-sonnet4.5', label: 'Claude Sonnet 4.5', description: 'Best for complex agents and coding' },
+          { value: 'claude-haiku4.5', label: 'Claude Haiku 4.5', description: 'Fast and cost-effective' },
+          { value: 'claude-opus4.5', label: 'Claude Opus 4.5', description: 'Maximum intelligence (Pro+ only)' },
+        ],
+        help: 'Kiro model to use (see kiro.dev/docs/cli/chat/model-selection)',
+      },
     ];
   }
 
@@ -182,6 +211,11 @@ export class KiroAgentPlugin extends BaseAgentPlugin {
     // Agent selection
     if (this.agent) {
       args.push('--agent', this.agent);
+    }
+
+    // Model selection
+    if (this.model) {
+      args.push('--model', this.model);
     }
 
     // Note: Prompt is passed via stdin (see getStdinInput) to avoid
@@ -207,8 +241,10 @@ export class KiroAgentPlugin extends BaseAgentPlugin {
     return null;
   }
 
-  override validateModel(_model: string): string | null {
-    // Kiro doesn't expose model selection via CLI
+  override validateModel(model: string): string | null {
+    if (model && !VALID_KIRO_MODELS.includes(model as typeof VALID_KIRO_MODELS[number])) {
+      return `Invalid model. Must be one of: ${VALID_KIRO_MODELS.filter(m => m).join(', ')} (or empty for Auto)`;
+    }
     return null;
   }
 }

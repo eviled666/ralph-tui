@@ -119,6 +119,42 @@ export const DEFAULT_SANDBOX_CONFIG: Required<
 };
 
 /**
+ * Configuration for parallel execution behavior.
+ */
+export interface ParallelConfig {
+  /** Execution mode: 'auto' analyzes dependencies, 'always' forces parallel, 'never' disables */
+  mode?: 'auto' | 'always' | 'never';
+
+  /** Maximum concurrent workers (default: 3) */
+  maxWorkers?: number;
+
+  /** Directory for git worktrees relative to project root (default: '.ralph-tui/worktrees') */
+  worktreeDir?: string;
+
+  /**
+   * Merge directly to the current branch instead of creating a session branch.
+   * When false (default), a session branch `ralph-session/{shortId}` is created
+   * and all worker changes are merged there. When true, uses the legacy behavior
+   * of merging directly to the current branch.
+   */
+  directMerge?: boolean;
+}
+
+/**
+ * Configuration for AI-powered conflict resolution during parallel execution.
+ */
+export interface ConflictResolutionConfig {
+  /** Whether to attempt AI resolution for merge conflicts (default: true) */
+  enabled?: boolean;
+
+  /** Timeout in milliseconds for AI resolution per file (default: 120000) */
+  timeoutMs?: number;
+
+  /** Maximum files to attempt AI resolution on per conflict (default: 10) */
+  maxFiles?: number;
+}
+
+/**
  * Runtime options that can be passed via CLI flags
  */
 export interface RuntimeOptions {
@@ -177,6 +213,15 @@ export interface RuntimeOptions {
   notify?: boolean;
 
   sandbox?: SandboxConfig;
+
+  /** Path to custom JSON theme file (absolute or relative to cwd) */
+  themePath?: string;
+
+  /** Force sequential execution (--serial or --sequential) */
+  serial?: boolean;
+
+  /** Enable parallel execution, optionally with worker count (--parallel [N]) */
+  parallel?: number | boolean;
 }
 
 /**
@@ -262,6 +307,13 @@ export interface StoredConfig {
    */
   envExclude?: string[];
 
+  /**
+   * Shorthand: environment variables to pass through despite matching default exclusion patterns.
+   * Use this to explicitly allow specific keys that are blocked by built-in defaults.
+   * Supports exact names (e.g., "ANTHROPIC_API_KEY") or glob patterns.
+   */
+  envPassthrough?: string[];
+
   /** Whether to auto-commit after successful tasks */
   autoCommit?: boolean;
 
@@ -278,6 +330,12 @@ export interface StoredConfig {
 
   /** Image attachment configuration */
   images?: ImageConfig;
+
+  /** Parallel execution configuration */
+  parallel?: ParallelConfig;
+
+  /** Conflict resolution configuration for parallel execution */
+  conflictResolution?: ConflictResolutionConfig;
 }
 
 /**
@@ -327,6 +385,19 @@ export interface RalphConfig {
 
   /** Session ID for log file naming and tracking */
   sessionId?: string;
+
+  /** Whether to auto-commit after successful task completion (default: false) */
+  autoCommit?: boolean;
+
+  /**
+   * Optional list of task IDs to execute. When provided, only tasks with these
+   * IDs will be executed, filtering out any others returned by the tracker.
+   * Used for --task-range filtering.
+   */
+  filteredTaskIds?: string[];
+
+  /** Conflict resolution configuration for parallel execution */
+  conflictResolution?: ConflictResolutionConfig;
 }
 
 /**

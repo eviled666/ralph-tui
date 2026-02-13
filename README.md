@@ -116,6 +116,9 @@ ralph-tui run --headless
 # Run agent in isolated sandbox (bwrap on Linux, sandbox-exec on macOS)
 # Requires bwrap to be installed and on PATH (Linux) or uses built-in sandbox-exec (macOS)
 ralph-tui run --sandbox
+
+# Use a bundled color theme by name
+ralph-tui run --theme dracula
 ```
 
 ### Create PRD Options
@@ -166,18 +169,39 @@ ralph-tui create-prd --output ./docs
 
 See the [full CLI reference](https://ralph-tui.com/docs/cli/overview) for all options.
 
+### Custom Themes
+
+Ralph TUI supports custom color themes via the `--theme` option:
+
+```bash
+# Use a bundled theme by name
+ralph-tui run --theme dracula
+
+# Or use a custom theme file
+ralph-tui run --theme ./my-custom-theme.json
+```
+
+![Custom Theme Example](docs/images/theme-example.png)
+
+Bundled themes: `bright`, `catppuccin`, `dracula`, `high-contrast`, `solarized-light`
+
+See the [Themes documentation](https://ralph-tui.com/docs/configuration/themes) for the full theme schema and creating custom themes.
+
 ### Using Skills Directly in Your Agent
 
-After running `ralph-tui setup`, skills are installed to your agent's skills directory:
+Install ralph-tui skills to your agent using [add-skill](https://github.com/vercel-labs/add-skill):
 
-| Agent | Skills Location |
-|-------|-----------------|
-| Claude Code | `~/.claude/skills/` |
-| OpenCode | `~/.config/opencode/skills/` |
-| Factory Droid | `~/.factory/skills/` |
-| Gemini CLI | `~/.gemini/skills/` |
-| Codex | `~/.codex/skills/` |
-| Kiro CLI | `~/.kiro/skills/` |
+```bash
+# Install all skills to all detected agents globally
+bunx add-skill subsy/ralph-tui --all
+
+# Install to a specific agent
+bunx add-skill subsy/ralph-tui -a claude-code -g -y
+
+# Or use the ralph-tui wrapper (maps agent IDs automatically)
+ralph-tui skills install
+ralph-tui skills install --agent claude
+```
 
 Use these slash commands in your agent:
 

@@ -53,7 +53,9 @@ outputDir = ".ralph-tui/iterations"
 # Progress file for cross-iteration context
 progressFile = ".ralph-tui/progress.md"
 
-# Auto-commit after each completed task
+# Auto-commit: when true, ralph-tui stages and commits all changes after each
+# successful task completion. When false, no automatic commit is made (agents
+# may still commit on their own if instructed by templates or CLAUDE.md).
 autoCommit = false
 
 # Custom prompt template path (relative or absolute)
@@ -126,6 +128,20 @@ enabled = true
 
 # Sound mode: "off", "system", or "ralph"
 sound = "off"
+
+# ─────────────────────────────────────────────
+# Parallel Execution
+# ─────────────────────────────────────────────
+
+[parallel]
+# Mode: "auto" (analyze dependencies), "always" (force parallel), "never" (disable)
+mode = "auto"
+
+# Maximum concurrent workers (git worktrees)
+maxWorkers = 3
+
+# Directory for worker worktrees (relative to project root)
+worktreeDir = ".ralph-tui/worktrees"
 ```
 
 ## Common Configurations

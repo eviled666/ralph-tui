@@ -6,7 +6,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { BaseAgentPlugin, findCommandPath } from '../base.js';
+import { BaseAgentPlugin, findCommandPath, quoteForWindowsShell } from '../base.js';
 import { processAgentEvents, processAgentEventsToSegments, type AgentDisplayEvent } from '../output-formatting.js';
 import type {
   AgentPluginMeta,
@@ -197,6 +197,9 @@ export class OpenCodeAgentPlugin extends BaseAgentPlugin {
       personal: '~/.config/opencode/skills',
       repo: '.opencode/skills',
     },
+    // NOTE: OpenCode's 'run' command does not have a --dir flag.
+    // It accepts a positional [project] path for TUI mode, but run mode
+    // relies on the spawn working directory.
   };
 
   /** AI provider (any string, validated by OpenCode CLI) */
@@ -286,7 +289,7 @@ export class OpenCodeAgentPlugin extends BaseAgentPlugin {
     return {
       // ~/.local/share/opencode contains auth.json with OAuth tokens
       authPaths: ['~/.opencode', '~/.config/opencode', '~/.local/share/opencode'],
-      binaryPaths: ['/usr/local/bin', '~/.local/bin', '~/go/bin'],
+      binaryPaths: ['/usr/local/bin', '~/.local/bin', '~/go/bin', '/opt/homebrew/bin'],
       runtimePaths: [],
       requiresNetwork: true,
     };
@@ -300,7 +303,7 @@ export class OpenCodeAgentPlugin extends BaseAgentPlugin {
   ): Promise<{ success: boolean; version?: string; error?: string }> {
     return new Promise((resolve) => {
       const useShell = process.platform === 'win32';
-      const proc = spawn(command, ['--version'], {
+      const proc = spawn(useShell ? quoteForWindowsShell(command) : command, ['--version'], {
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: useShell,
       });
@@ -339,11 +342,11 @@ export class OpenCodeAgentPlugin extends BaseAgentPlugin {
         }
       });
 
-      // Timeout after 5 seconds
+      // Timeout after 15 seconds
       setTimeout(() => {
         proc.kill();
         resolve({ success: false, error: 'Timeout waiting for --version' });
-      }, 5000);
+      }, 15000);
     });
   }
 

@@ -5,8 +5,9 @@
  */
 
 import { spawn } from 'node:child_process';
-import { BaseAgentPlugin, findCommandPath } from '../base.js';
+import { BaseAgentPlugin, findCommandPath, quoteForWindowsShell } from '../base.js';
 import { processAgentEvents, processAgentEventsToSegments, type AgentDisplayEvent } from '../output-formatting.js';
+import { extractErrorMessage } from '../utils.js';
 import type {
   AgentPluginMeta,
   AgentPluginFactory,
@@ -17,27 +18,8 @@ import type {
   AgentExecutionHandle,
 } from '../types.js';
 
-/**
- * Extract a string error message from various error formats.
- * Handles: string, { message: string }, or other objects.
- * @internal Exported for testing only.
- */
-export function extractErrorMessage(err: unknown): string {
-  if (!err) return '';
-  if (typeof err === 'string') return err;
-  if (typeof err === 'object') {
-    const obj = err as Record<string, unknown>;
-    if (typeof obj.message === 'string') return obj.message;
-    if (typeof obj.error === 'string') return obj.error;
-    // Fallback: stringify the object
-    try {
-      return JSON.stringify(err);
-    } catch {
-      return 'Unknown error';
-    }
-  }
-  return String(err);
-}
+// Re-export for backward compatibility with tests
+export { extractErrorMessage } from '../utils.js';
 
 /**
  * Parse Gemini JSON line into standardized display events.
@@ -190,7 +172,7 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
     return new Promise((resolve) => {
       // Only use shell on Windows where direct spawn may not work
       const useShell = process.platform === 'win32';
-      const proc = spawn(command, ['--version'], {
+      const proc = spawn(useShell ? quoteForWindowsShell(command) : command, ['--version'], {
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: useShell,
       });
@@ -237,7 +219,7 @@ export class GeminiAgentPlugin extends BaseAgentPlugin {
       const timer = setTimeout(() => {
         proc.kill();
         safeResolve({ success: false, error: 'Timeout waiting for --version' });
-      }, 5000);
+      }, 15000);
     });
   }
 

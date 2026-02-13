@@ -209,6 +209,7 @@ function mergeConfigs(
   if (project.fallbackAgents !== undefined)
     merged.fallbackAgents = project.fallbackAgents;
   if (project.envExclude !== undefined) merged.envExclude = project.envExclude;
+  if (project.envPassthrough !== undefined) merged.envPassthrough = project.envPassthrough;
 
   // Merge nested objects
   if (project.rateLimitHandling !== undefined) {
@@ -310,9 +311,20 @@ export function serializeConfig(config: StoredConfig): string {
 }
 
 /**
- * Get default agent configuration based on available plugins
+ * Get default agent configuration based on available plugins.
+ * This centralizes the logic for resolving which agent to use, checking (in order):
+ * 1. CLI override (options.agent)
+ * 2. Shorthand agent field (storedConfig.agent)
+ * 3. Stored defaultAgent setting
+ * 4. Agent with default: true in agents array
+ * 5. First agent in agents array
+ * 6. Built-in claude plugin
+ *
+ * @param storedConfig The loaded configuration from TOML files
+ * @param options Runtime options (can be empty object for non-CLI usage)
+ * @returns The resolved agent configuration with all shorthand options applied
  */
-function getDefaultAgentConfig(
+export function getDefaultAgentConfig(
   storedConfig: StoredConfig,
   options: RuntimeOptions,
 ): AgentPluginConfig | undefined {
@@ -369,6 +381,14 @@ function getDefaultAgentConfig(
       result = {
         ...result,
         envExclude: storedConfig.envExclude,
+      };
+    }
+
+    // Apply envPassthrough shorthand (only if not already set on agent config)
+    if (storedConfig.envPassthrough && !result.envPassthrough) {
+      result = {
+        ...result,
+        envPassthrough: storedConfig.envPassthrough,
       };
     }
 
@@ -623,6 +643,7 @@ export async function buildConfig(
     sandbox,
     // CLI --prompt takes precedence over config file prompt_template
     promptTemplate: options.promptPath ?? storedConfig.prompt_template,
+    autoCommit: storedConfig.autoCommit ?? false,
   };
 }
 
@@ -660,12 +681,19 @@ export async function validateConfig(
   // Validate tracker-specific requirements
   if (
     config.tracker.plugin === "beads" ||
-    config.tracker.plugin === "beads-bv"
+    config.tracker.plugin === "beads-bv" ||
+    config.tracker.plugin === "beads-rust"
   ) {
     if (!config.epicId) {
-      warnings.push(
-        "No epic ID specified for beads tracker; will use current directory",
-      );
+      if (config.showTui) {
+        warnings.push(
+          "No epic ID specified for beads tracker; will show interactive epic selection",
+        );
+      } else {
+        warnings.push(
+          "No epic ID specified for beads tracker; running headless so no interactive epic selection available",
+        );
+      }
     }
   }
 

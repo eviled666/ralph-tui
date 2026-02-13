@@ -40,6 +40,15 @@ export interface AgentPreflightResult {
 
   /** How long the preflight check took in milliseconds */
   durationMs?: number;
+
+  /** Exit code from the preflight execution (for diagnostics) */
+  exitCode?: number;
+
+  /** Stderr output from the preflight execution (for diagnostics) */
+  stderr?: string;
+
+  /** Stdout output from the preflight execution (for diagnostics) */
+  stdout?: string;
 }
 
 /**
@@ -244,6 +253,17 @@ export interface AgentPluginConfig {
    * @example ["*_API_KEY", "*_SECRET"] - Exclude all API keys and secrets
    */
   envExclude?: string[];
+
+  /**
+   * Environment variables to pass through despite matching default exclusion patterns.
+   * Use this to explicitly allow specific keys that are blocked by the built-in
+   * defaults (*_API_KEY, *_SECRET_KEY, *_SECRET).
+   * Supports exact names (e.g., "ANTHROPIC_API_KEY") or glob patterns.
+   *
+   * @example ["ANTHROPIC_API_KEY"] - Allow this specific key through
+   * @example ["MY_*"] - Allow all MY_* vars through even if they match *_API_KEY
+   */
+  envPassthrough?: string[];
 }
 
 export interface AgentSandboxRequirements {
@@ -315,6 +335,7 @@ export interface AgentPluginMeta {
    * If undefined, the agent does not support skill installation.
    */
   skillsPaths?: AgentSkillsPaths;
+
 }
 
 /**

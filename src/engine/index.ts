@@ -22,6 +22,8 @@ import type {
   IterationRateLimitedEvent,
   RateLimitState,
   SubagentTreeNode,
+  TaskAutoCommittedEvent,
+  TaskAutoCommitFailedEvent,
 } from './types.js';
 import { toEngineSubagentState } from './types.js';
 import type { RalphConfig, RateLimitHandlingConfig } from '../config/types.js';
@@ -40,7 +42,8 @@ import {
   openCodeTaskToClaudeMessages,
 } from '../plugins/agents/opencode/outputParser.js';
 import { updateSessionIteration, updateSessionStatus, updateSessionMaxIterations } from '../session/index.js';
-import { saveIterationLog, buildSubagentTrace, createProgressEntry, appendProgress, getRecentProgressSummary, getCodebasePatternsForPrompt } from '../logs/index.js';
+import { saveIterationLog, buildSubagentTrace, getRecentProgressSummary, getCodebasePatternsForPrompt } from '../logs/index.js';
+import { performAutoCommit } from './auto-commit.js';
 import type { AgentSwitchEntry } from '../logs/index.js';
 import { renderPrompt } from '../templates/index.js';
 
@@ -124,6 +127,18 @@ async function buildPrompt(
 }
 
 /**
+ * Options for initializing the engine in worker mode.
+ * Used by parallel workers to inject a pre-initialized tracker
+ * and force the engine to work on a specific task.
+ */
+export interface WorkerModeOptions {
+  /** Pre-initialized tracker plugin (avoids re-initializing in worktree) */
+  tracker: TrackerPlugin;
+  /** The specific task this engine should work on */
+  forcedTask: TrackerTask;
+}
+
+/**
  * Execution engine for the agent loop
  */
 export class ExecutionEngine {
@@ -152,6 +167,10 @@ export class ExecutionEngine {
   private primaryAgentInstance: AgentPlugin | null = null;
   /** Track agent switches during the current iteration for logging */
   private currentIterationAgentSwitches: AgentSwitchEntry[] = [];
+  /** Forced task for worker mode — engine only works on this one task */
+  private forcedTask: TrackerTask | null = null;
+  /** Track if the forced task has been processed (prevents infinite loop on skip/fail) */
+  private forcedTaskProcessed = false;
 
   constructor(config: RalphConfig) {
     this.config = config;
@@ -188,9 +207,13 @@ export class ExecutionEngine {
   }
 
   /**
-   * Initialize the engine with plugins
+   * Initialize the engine with plugins.
+   *
+   * @param workerMode - Optional worker mode options for parallel execution.
+   *   When provided, the engine uses the injected tracker and works only on
+   *   the forced task, skipping tracker initialization and sync.
    */
-  async initialize(): Promise<void> {
+  async initialize(workerMode?: WorkerModeOptions): Promise<void> {
     // Get agent instance
     const agentRegistry = getAgentRegistry();
     this.agent = await agentRegistry.getInstance(this.config.agent);
@@ -227,16 +250,25 @@ export class ExecutionEngine {
       primaryAgent: this.config.agent.plugin,
     };
 
-    // Get tracker instance
-    const trackerRegistry = getTrackerRegistry();
-    this.tracker = await trackerRegistry.getInstance(this.config.tracker);
+    if (workerMode) {
+      // Worker mode: use injected tracker and forced task.
+      // This avoids re-initializing the tracker in a worktree directory
+      // where the beads/tracker data may not be accessible.
+      this.tracker = workerMode.tracker;
+      this.forcedTask = workerMode.forcedTask;
+      this.state.totalTasks = 1;
+    } else {
+      // Normal mode: initialize tracker from config
+      const trackerRegistry = getTrackerRegistry();
+      this.tracker = await trackerRegistry.getInstance(this.config.tracker);
 
-    // Sync tracker
-    await this.tracker.sync();
+      // Sync tracker
+      await this.tracker.sync();
 
-    // Get initial task count
-    const tasks = await this.tracker.getTasks({ status: ['open', 'in_progress'] });
-    this.state.totalTasks = tasks.length;
+      // Get initial task count
+      const tasks = await this.tracker.getTasks({ status: ['open', 'in_progress'] });
+      this.state.totalTasks = tasks.length;
+    }
   }
 
   /**
@@ -464,8 +496,11 @@ export class ExecutionEngine {
         break;
       }
 
-      // Check if all tasks complete
-      const isComplete = await this.tracker!.isComplete();
+      // Check if all tasks complete.
+      // In worker mode, check only the forced task (not the global tracker).
+      const isComplete = this.forcedTask
+        ? this.state.tasksCompleted >= 1
+        : await this.tracker!.isComplete();
       if (isComplete) {
         this.emit({
           type: 'all:complete',
@@ -529,19 +564,54 @@ export class ExecutionEngine {
    * Get the next available task, excluding skipped ones.
    * Delegates to the tracker's getNextTask() for proper dependency-aware ordering.
    * See: https://github.com/subsy/ralph-tui/issues/97
+   *
+   * In worker mode (forcedTask set), returns the forced task until it's completed,
+   * then returns null to stop the engine.
    */
   private async getNextAvailableTask(): Promise<TrackerTask | null> {
+    // Worker mode: return the forced task until it's been processed (completed, skipped, or failed)
+    if (this.forcedTask) {
+      if (this.state.tasksCompleted >= 1 || this.forcedTaskProcessed) {
+        return null; // Task was processed, stop the engine
+      }
+      return this.forcedTask;
+    }
+
+    // If filteredTaskIds is defined but empty, no tasks are allowed
+    if (this.config.filteredTaskIds && this.config.filteredTaskIds.length === 0) {
+      return null;
+    }
+
     // Convert skipped tasks Set to array for the filter
-    const excludeIds = Array.from(this.skippedTasks);
+    const excludeIds = new Set(this.skippedTasks);
 
-    // Delegate to tracker's getNextTask for dependency-aware ordering
-    // The tracker (e.g., beads) uses bd ready which properly handles dependencies
-    const task = await this.tracker!.getNextTask({
-      status: ['open', 'in_progress'],
-      excludeIds: excludeIds.length > 0 ? excludeIds : undefined,
-    });
+    // Loop to find an allowed task (respecting filteredTaskIds if set)
+    // Keep trying until we find a task in the allowed list or run out
+    while (true) {
+      // Delegate to tracker's getNextTask for dependency-aware ordering
+      // The tracker (e.g., beads) uses bd ready which properly handles dependencies
+      const task = await this.tracker!.getNextTask({
+        status: ['open', 'in_progress'],
+        excludeIds: excludeIds.size > 0 ? Array.from(excludeIds) : undefined,
+      });
 
-    return task ?? null;
+      // No more tasks available
+      if (!task) {
+        return null;
+      }
+
+      // Check if task is in the allowed list (if filtering is enabled)
+      if (this.config.filteredTaskIds && this.config.filteredTaskIds.length > 0) {
+        if (!this.config.filteredTaskIds.includes(task.id)) {
+          // Task is outside the allowed range, skip it and try again
+          excludeIds.add(task.id);
+          continue;
+        }
+      }
+
+      // Task is allowed
+      return task;
+    }
   }
 
   /**
@@ -618,6 +688,10 @@ export class ExecutionEngine {
           this.emitSkipEvent(task, skipReason);
           this.skippedTasks.add(task.id);
           this.retryCountMap.delete(task.id);
+          // Mark forced task as processed to prevent infinite loop
+          if (this.forcedTask?.id === task.id) {
+            this.forcedTaskProcessed = true;
+          }
         }
         break;
       }
@@ -634,6 +708,10 @@ export class ExecutionEngine {
         });
         this.emitSkipEvent(task, errorMessage);
         this.skippedTasks.add(task.id);
+        // Mark forced task as processed to prevent infinite loop
+        if (this.forcedTask?.id === task.id) {
+          this.forcedTaskProcessed = true;
+        }
         break;
       }
 
@@ -647,6 +725,10 @@ export class ExecutionEngine {
           task,
           action: 'abort',
         });
+        // Mark forced task as processed to prevent infinite loop
+        if (this.forcedTask?.id === task.id) {
+          this.forcedTaskProcessed = true;
+        }
         break;
       }
     }
@@ -999,12 +1081,21 @@ export class ExecutionEngine {
       const promiseComplete = PROMISE_COMPLETE_PATTERN.test(agentResult.stdout);
 
       // Determine if task was completed
-      const taskCompleted =
-        promiseComplete || agentResult.status === 'completed';
+      // IMPORTANT: Only use the explicit <promise>COMPLETE</promise> signal.
+      // Exit code 0 alone does NOT indicate task completion - an agent may exit
+      // cleanly after asking clarification questions or hitting a blocker.
+      // See: https://github.com/subsy/ralph-tui/issues/259
+      const taskCompleted = promiseComplete;
 
       // Update tracker if task completed
+      // In worker mode (forcedTask set), skip tracker update — the ParallelExecutor
+      // will call completeTask after the merge succeeds. This avoids race conditions
+      // when multiple workers try to update the tracker concurrently.
+      // See: https://github.com/subsy/ralph-tui/issues/275
       if (taskCompleted) {
-        await this.tracker!.completeTask(task.id, 'Completed by agent');
+        if (!this.forcedTask) {
+          await this.tracker!.completeTask(task.id, 'Completed by agent');
+        }
         this.emit({
           type: 'task:completed',
           timestamp: new Date().toISOString(),
@@ -1015,6 +1106,11 @@ export class ExecutionEngine {
         // Clear rate-limited agents tracking on task completion
         // This allows agents to be retried for the next task
         this.clearRateLimitedAgents();
+      }
+
+      // Auto-commit after task completion (before iteration log is saved)
+      if (taskCompleted && this.config.autoCommit) {
+        await this.handleAutoCommit(task, iteration);
       }
 
       // Determine iteration status
@@ -1058,15 +1154,6 @@ export class ExecutionEngine {
         sandboxConfig: this.config.sandbox,
       });
 
-      // Append progress entry for cross-iteration context
-      // This provides agents with history of what's been done
-      try {
-        const progressEntry = createProgressEntry(result);
-        await appendProgress(this.config.cwd, progressEntry);
-      } catch {
-        // Don't fail iteration if progress append fails
-      }
-
       this.emit({
         type: 'iteration:completed',
         timestamp: endedAt.toISOString(),
@@ -1094,14 +1181,6 @@ export class ExecutionEngine {
         startedAt: startedAt.toISOString(),
         endedAt: endedAt.toISOString(),
       };
-
-      // Append progress entry for failed iterations too
-      try {
-        const progressEntry = createProgressEntry(failedResult);
-        await appendProgress(this.config.cwd, progressEntry);
-      } catch {
-        // Don't fail iteration if progress append fails
-      }
 
       return failedResult;
     } finally {
@@ -1874,6 +1953,51 @@ export class ExecutionEngine {
   }
 
   /**
+   * Perform auto-commit after successful task completion.
+   * Emits task:auto-committed on success, task:auto-commit-failed on error.
+   * Failures never halt engine execution.
+   */
+  private async handleAutoCommit(task: TrackerTask, iteration: number): Promise<void> {
+    try {
+      const result = await performAutoCommit(this.config.cwd, task.id, task.title);
+      if (result.committed) {
+        this.emit({
+          type: 'task:auto-committed',
+          timestamp: new Date().toISOString(),
+          task,
+          iteration,
+          commitMessage: result.commitMessage!,
+          commitSha: result.commitSha,
+        });
+      } else if (result.error) {
+        this.emit({
+          type: 'task:auto-commit-failed',
+          timestamp: new Date().toISOString(),
+          task,
+          iteration,
+          error: result.error,
+        });
+      } else if (result.skipReason) {
+        this.emit({
+          type: 'task:auto-commit-skipped',
+          timestamp: new Date().toISOString(),
+          task,
+          iteration,
+          reason: result.skipReason,
+        });
+      }
+    } catch (err) {
+      this.emit({
+        type: 'task:auto-commit-failed',
+        timestamp: new Date().toISOString(),
+        task,
+        iteration,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
    * Dispose of engine resources
    */
   async dispose(): Promise<void> {
@@ -1899,6 +2023,8 @@ export type {
   IterationRateLimitedEvent,
   IterationResult,
   IterationStatus,
+  TaskAutoCommittedEvent,
+  TaskAutoCommitFailedEvent,
   RateLimitState,
   SubagentTreeNode,
 };
