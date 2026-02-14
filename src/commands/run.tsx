@@ -83,6 +83,25 @@ import { spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import { getEnvExclusionReport, formatEnvExclusionReport } from '../plugins/agents/base.js';
 
+type PersistState = (state: PersistedSessionState) => void | Promise<void>;
+
+type ParallelFailureCarrier = {
+  failureMessage: string | null;
+};
+
+export function applyParallelFailureState(
+  currentState: PersistedSessionState,
+  parallelState: ParallelFailureCarrier,
+  failureMessage: string,
+  persistState: PersistState
+): PersistedSessionState {
+  const nextFailureMessage = parallelState.failureMessage ?? failureMessage;
+  parallelState.failureMessage = nextFailureMessage;
+  const nextState = failSession(currentState, nextFailureMessage);
+  persistState(nextState);
+  return nextState;
+}
+
 /**
  * Determine if all tasks are complete based on parallel/sequential mode state.
  *
@@ -1771,9 +1790,14 @@ async function runParallelWithTui(
         break;
 
       case 'parallel:failed':
-        currentState = failSession(currentState);
-        parallelState.failureMessage = event.error;
-        savePersistedSession(currentState).catch(() => {});
+        currentState = applyParallelFailureState(
+          currentState,
+          parallelState,
+          event.error,
+          (state) => {
+            savePersistedSession(state).catch(() => {});
+          }
+        );
         break;
     }
 
@@ -1968,9 +1992,14 @@ async function runParallelWithTui(
   }).catch(() => {
     // Error already emitted as parallel:failed event, but keep this as a fallback
     // for engines that reject without emitting the event.
-    if (!parallelState.failureMessage) {
-      parallelState.failureMessage = 'Parallel execution failed before startup';
-    }
+    currentState = applyParallelFailureState(
+      currentState,
+      parallelState,
+      'Parallel execution failed before startup',
+      (state) => {
+        savePersistedSession(state).catch(() => {});
+      }
+    );
     triggerRerender?.();
   });
 
