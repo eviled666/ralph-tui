@@ -1729,6 +1729,7 @@ async function runParallelWithTui(
   // on the next render (no events are lost even if the trigger isn't set yet).
   let triggerRerender: (() => void) | null = null;
   let executionPromise: Promise<void> | null = null;
+  let shutdownPromise: Promise<void> | null = null;
 
   const resetParallelStateForRestart = (): void => {
     parallelState.failureMessage = null;
@@ -1776,6 +1777,13 @@ async function runParallelWithTui(
         executionPromise = null;
       }
     });
+  };
+
+  const handleShutdownError = (context: string, error: unknown): void => {
+    const message = error instanceof Error ? error.message : String(error);
+    // Surface a best-effort message in the parallel UI instead of throwing.
+    parallelState.failureMessage = parallelState.failureMessage ?? `${context}: ${message}`;
+    triggerRerender?.();
   };
 
   const renderer = await createCliRenderer({
@@ -1993,14 +2001,44 @@ async function runParallelWithTui(
 
   // Graceful shutdown
   const gracefulShutdown = async (): Promise<void> => {
-    // Wait for execute() to unwind so cleanup() runs (worktrees, branches, tags).
-    if (executionPromise) {
-      await parallelExecutor.stop();
-      await executionPromise;
+    if (shutdownPromise) {
+      await shutdownPromise;
+      return;
     }
-    await savePersistedSession(currentState);
-    await cleanup();
-    resolveQuitPromise?.();
+
+    shutdownPromise = (async () => {
+      // Wait for execute() to unwind so cleanup() runs (worktrees, branches, tags).
+      const exec = executionPromise;
+      if (exec) {
+        try {
+          await parallelExecutor.stop();
+        } catch (error) {
+          handleShutdownError('Failed to stop parallel executor', error);
+        }
+
+        try {
+          await exec;
+        } catch (error) {
+          handleShutdownError('Parallel executor failed during shutdown', error);
+        }
+      }
+
+      try {
+        await savePersistedSession(currentState);
+      } catch (error) {
+        handleShutdownError('Failed to persist session during shutdown', error);
+      }
+
+      try {
+        await cleanup();
+      } catch (error) {
+        handleShutdownError('Failed to cleanup TUI during shutdown', error);
+      }
+
+      resolveQuitPromise?.();
+    })();
+
+    await shutdownPromise;
   };
 
   // Force quit
@@ -2096,9 +2134,19 @@ async function runParallelWithTui(
         onParallelPause={() => parallelExecutor.pause()}
         onParallelResume={() => parallelExecutor.resume()}
         onParallelKill={async () => {
-          if (executionPromise) {
-            await parallelExecutor.stop();
-            await executionPromise;
+          const exec = executionPromise;
+          if (exec) {
+            try {
+              await parallelExecutor.stop();
+            } catch (error) {
+              handleShutdownError('Failed to stop parallel executor', error);
+            }
+
+            try {
+              await exec;
+            } catch (error) {
+              handleShutdownError('Parallel executor failed while stopping', error);
+            }
           }
         }}
         onParallelStart={() => {

@@ -490,6 +490,16 @@ describe('run command', () => {
       );
       expect(next).toEqual(new Set(['task-2']));
     });
+
+    test('removes task ID when task did not complete regardless of commit count', () => {
+      const next = updateCompletedLocallyTaskIds(
+        new Set<string>(['task-1', 'task-2']),
+        'task-1',
+        false,
+        9
+      );
+      expect(next).toEqual(new Set(['task-2']));
+    });
   });
 
   describe('applyParallelCompletionState', () => {
