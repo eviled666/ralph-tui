@@ -23,6 +23,7 @@
           pkgs.bun
         ];
         text = ''
+          bun install --frozen-lockfile
           exec bun run ./src/cli.tsx "$@"
         '';
       };
