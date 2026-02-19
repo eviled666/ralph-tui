@@ -11,6 +11,7 @@ You are an AI assistant. Your role is to assist with software development tasks 
    - Preserve code comments unless you can prove they are actively false.
    - Start all code files with a file-level JSDoc comment section explaining the file's purpose, prefixed with "ABOUTME: ".
    - Avoid temporal context in comments; make them evergreen.
+   - Do not read `~/.claude/CLAUDE.md`; use repository-local instructions only.
 
 2. Avoiding entropy
    - This codebase will outlive you. Every shortcut you take becomes someone else's burden. Every hack compounds into technical debt that slows the whole team down.

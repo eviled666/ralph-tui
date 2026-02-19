@@ -23,8 +23,7 @@
           pkgs.bun
         ];
         text = ''
-          bun install --frozen-lockfile
-          exec bun run ./src/cli.tsx "$@"
+          exec bun ${self}/src/cli.tsx "$@"
         '';
       };
 
@@ -34,8 +33,7 @@
           pkgs.bun
         ];
         text = ''
-          bun install --frozen-lockfile
-          exec bun run dev "$@"
+          exec bun ${self}/src/cli.tsx "$@"
         '';
       };
     in {

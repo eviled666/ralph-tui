@@ -139,6 +139,48 @@ The JSON tracker validates your file against a specific schema.
 | `labels` | string[] | No | Tags for categorization |
 | `dependsOn` | string[] | No | IDs of blocking tasks |
 | `notes` | string | No | Additional notes |
+| `metadata` | object | No | Optional per-task metadata (including routing keys) |
+
+### Task Routing Metadata (v1)
+
+For per-task routing, Ralph reads routing keys from each user story's `metadata` object.
+
+- `metadata.agent` - Primary routing key (preferred)
+- `metadata.provider` - Alias routing key (used when `metadata.agent` is not set)
+- `metadata.model` - Optional per-task model override
+
+Resolution order for routed agent selection:
+
+1. `metadata.agent`
+2. `metadata.provider`
+
+Supported v1 routed agents:
+
+- `claude`
+- `opencode`
+- `codex`
+- `gemini`
+
+If neither `metadata.agent` nor `metadata.provider` is present, Ralph uses your configured default agent.
+
+### Routed Task Example
+
+```json
+{
+  "id": "US-010",
+  "title": "Generate API docs",
+  "description": "As a maintainer, I want generated API docs for new endpoints.",
+  "priority": 2,
+  "passes": false,
+  "dependsOn": [],
+  "metadata": {
+    "agent": "codex",
+    "model": "gpt-5"
+  }
+}
+```
+
+This is a valid task object: it keeps required fields (`id`, `title`, `passes`) and adds optional routing metadata.
 
 ### Complete Example
 
