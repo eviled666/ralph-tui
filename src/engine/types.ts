@@ -301,7 +301,7 @@ export interface EngineResumedEvent extends EngineEventBase {
 export interface EngineWarningEvent extends EngineEventBase {
   type: 'engine:warning';
   /** Warning code for programmatic handling */
-  code: 'sandbox-network-conflict';
+  code: 'sandbox-network-conflict' | 'task-routing-invalid-agent';
   /** Human-readable warning message */
   message: string;
 }

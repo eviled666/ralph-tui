@@ -1054,5 +1054,71 @@ describe('ExecutionEngine', () => {
       const executeOptions = primaryExecute.mock.calls[0]?.[2];
       expect(executeOptions?.flags).toEqual(['--model', 'global-model']);
     });
+
+    test('warns and falls back to configured default agent when metadata.agent is invalid', async () => {
+      const defaultAgent = createMockAgentPlugin({
+        meta: { id: 'claude', name: 'Claude' },
+      });
+      const defaultExecute = mock(() => ({
+        promise: Promise.resolve(createSuccessfulExecution('done')),
+        interrupt: mock(() => {}),
+      }));
+      defaultAgent.execute = defaultExecute as AgentPlugin['execute'];
+
+      const originalGetInstance = mockGetAgentInstance.getMockImplementation();
+      mockGetAgentInstance.mockImplementation((agentConfig) => {
+        if (agentConfig.plugin === 'claude') {
+          return Promise.resolve(defaultAgent);
+        }
+        if (agentConfig.plugin === 'not-a-real-agent') {
+          throw new Error("Unknown agent plugin 'not-a-real-agent'");
+        }
+        return Promise.resolve(defaultAgent);
+      });
+
+      config = createTestConfig({
+        maxIterations: 1,
+      });
+      engine = new ExecutionEngine(config);
+      engine.on((event) => events.push(event));
+
+      const routedTask = createTrackerTask({
+        id: 'task-invalid-route',
+        metadata: {
+          agent: '  not-a-real-agent  ',
+          provider: 'codex',
+        },
+      });
+
+      (mockTrackerInstance.getTasks as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve([routedTask])
+      );
+      (mockTrackerInstance.getNextTask as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve(routedTask)
+      );
+      (mockTrackerInstance.isComplete as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve(false)
+      );
+
+      try {
+        await engine.initialize();
+        await engine.start();
+      } finally {
+        mockGetAgentInstance.mockImplementation(originalGetInstance);
+      }
+
+      expect(defaultExecute).toHaveBeenCalledTimes(1);
+
+      const warningEvent = events.find(
+        (event) =>
+          event.type === 'engine:warning' &&
+          event.code === 'task-routing-invalid-agent'
+      );
+      expect(warningEvent).toBeDefined();
+      if (warningEvent?.type === 'engine:warning') {
+        expect(warningEvent.message).toContain('not-a-real-agent');
+        expect(warningEvent.message).toContain('claude');
+      }
+    });
   });
 });

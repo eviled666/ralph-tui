@@ -872,8 +872,41 @@ export class ExecutionEngine {
    * Apply per-task agent routing before execution begins.
    * If no routing metadata exists, keeps the configured default agent behavior.
    */
-  private async applyTaskAgentRouting(agentPlugin?: string): Promise<void> {
-    const targetPrimaryAgent = agentPlugin ?? this.config.agent.plugin;
+  private async applyTaskAgentRouting(agentPlugin?: string, taskId?: string): Promise<void> {
+    const defaultAgentPlugin = this.config.agent.plugin;
+    let targetPrimaryAgent = agentPlugin ?? defaultAgentPlugin;
+    let routedAgentInstance: AgentPlugin | null = null;
+
+    if (agentPlugin && agentPlugin !== defaultAgentPlugin) {
+      try {
+        const agentRegistry = getAgentRegistry();
+        const routingConfig = {
+          ...this.config.agent,
+          name: agentPlugin,
+          plugin: agentPlugin,
+          options: { ...this.config.agent.options },
+        };
+
+        const instance = await agentRegistry.getInstance(routingConfig);
+        const detectResult = await instance.detect();
+        if (!detectResult.available) {
+          throw new Error(detectResult.error ?? 'agent unavailable');
+        }
+
+        routedAgentInstance = instance;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const taskLabel = taskId ? `Task '${taskId}'` : 'Task';
+        this.emit({
+          type: 'engine:warning',
+          timestamp: new Date().toISOString(),
+          code: 'task-routing-invalid-agent',
+          message: `${taskLabel} requested unsupported agent '${agentPlugin}'. Falling back to configured default agent '${defaultAgentPlugin}'. (${errorMessage})`,
+        });
+        targetPrimaryAgent = defaultAgentPlugin;
+      }
+    }
+
     const currentPrimaryAgent = this.state.rateLimitState?.primaryAgent ?? this.config.agent.plugin;
 
     // Keep fallback for retries of the same primary agent.
@@ -893,23 +926,26 @@ export class ExecutionEngine {
       return;
     }
 
-    const agentRegistry = getAgentRegistry();
-    const routingConfig =
-      targetPrimaryAgent === this.config.agent.plugin
-        ? this.config.agent
-        : {
-            ...this.config.agent,
-            name: targetPrimaryAgent,
-            plugin: targetPrimaryAgent,
-            options: { ...this.config.agent.options },
-          };
+    let instance = routedAgentInstance;
+    if (!instance) {
+      const agentRegistry = getAgentRegistry();
+      const routingConfig =
+        targetPrimaryAgent === this.config.agent.plugin
+          ? this.config.agent
+          : {
+              ...this.config.agent,
+              name: targetPrimaryAgent,
+              plugin: targetPrimaryAgent,
+              options: { ...this.config.agent.options },
+            };
 
-    const instance = await agentRegistry.getInstance(routingConfig);
-    const detectResult = await instance.detect();
-    if (!detectResult.available) {
-      throw new Error(
-        `Agent '${targetPrimaryAgent}' not available: ${detectResult.error}`
-      );
+      instance = await agentRegistry.getInstance(routingConfig);
+      const detectResult = await instance.detect();
+      if (!detectResult.available) {
+        throw new Error(
+          `Agent '${targetPrimaryAgent}' not available: ${detectResult.error}`
+        );
+      }
     }
 
     this.agent = instance;
@@ -1042,7 +1078,7 @@ export class ExecutionEngine {
     });
 
     // Apply per-task routing before building prompt/executing this iteration.
-    await this.applyTaskAgentRouting(routing.agentPlugin);
+    await this.applyTaskAgentRouting(routing.agentPlugin, task.id);
 
     // Validate effective model for the active agent (global or per-task override).
     if (effectiveModel) {
