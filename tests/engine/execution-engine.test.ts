@@ -972,6 +972,7 @@ describe('ExecutionEngine', () => {
         model: 'global-model',
       });
       engine = new ExecutionEngine(config);
+      engine.on((event) => events.push(event));
 
       const routedTask = createTrackerTask({
         id: 'task-routed',
@@ -1008,6 +1009,18 @@ describe('ExecutionEngine', () => {
 
       const executeOptions = routedExecute.mock.calls[0]?.[2];
       expect(executeOptions?.flags).toEqual(['--model', 'gpt-5.3-codex']);
+
+      const startedEvent = events.find((event) => event.type === 'iteration:started');
+      expect(startedEvent).toBeDefined();
+      if (startedEvent?.type === 'iteration:started') {
+        expect(startedEvent.effectiveAgentPlugin).toBe('codex');
+        expect(startedEvent.effectiveModel).toBe('gpt-5.3-codex');
+      }
+
+      const [firstIteration] = engine.getState().iterations;
+      expect(firstIteration).toBeDefined();
+      expect(firstIteration?.effectiveAgentPlugin).toBe('codex');
+      expect(firstIteration?.effectiveModel).toBe('gpt-5.3-codex');
     });
 
     test('uses existing global agent and model when task metadata has no routing keys', async () => {
@@ -1118,6 +1131,13 @@ describe('ExecutionEngine', () => {
       if (warningEvent?.type === 'engine:warning') {
         expect(warningEvent.message).toContain('not-a-real-agent');
         expect(warningEvent.message).toContain('claude');
+      }
+
+      const startedEvent = events.find((event) => event.type === 'iteration:started');
+      expect(startedEvent).toBeDefined();
+      if (startedEvent?.type === 'iteration:started') {
+        expect(startedEvent.effectiveAgentPlugin).toBe('claude');
+        expect(startedEvent.effectiveModel).toBeUndefined();
       }
     });
   });

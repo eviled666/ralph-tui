@@ -2328,7 +2328,9 @@ async function runHeadless(
           event.iteration,
           config.maxIterations,
           event.task.id,
-          event.task.title
+          event.task.title,
+          event.effectiveAgentPlugin,
+          event.effectiveModel
         );
         break;
 

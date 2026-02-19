@@ -182,11 +182,22 @@ export class StructuredLogger {
 
   /**
    * Log progress update in the specified format.
-   * Format: [INFO] [progress] Iteration X/Y: Working on task-id
+   * Format: [INFO] [progress] Iteration X/Y: Working on task-id - title (agent: x, model: y)
    */
-  progress(iteration: number, maxIterations: number, taskId: string, taskTitle: string): void {
+  progress(
+    iteration: number,
+    maxIterations: number,
+    taskId: string,
+    taskTitle: string,
+    agentPlugin?: string,
+    model?: string
+  ): void {
     const iterMax = maxIterations > 0 ? maxIterations.toString() : '∞';
-    this.info('progress', `Iteration ${iteration}/${iterMax}: Working on ${taskId} - ${taskTitle}`);
+    const routingParts: string[] = [];
+    if (agentPlugin) routingParts.push(`agent: ${agentPlugin}`);
+    if (model) routingParts.push(`model: ${model}`);
+    const routingSuffix = routingParts.length > 0 ? ` (${routingParts.join(', ')})` : '';
+    this.info('progress', `Iteration ${iteration}/${iterMax}: Working on ${taskId} - ${taskTitle}${routingSuffix}`);
   }
 
   /**

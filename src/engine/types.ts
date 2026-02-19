@@ -168,6 +168,12 @@ export interface IterationResult {
   /** Agent execution result */
   agentResult?: AgentExecutionResult;
 
+  /** Effective agent plugin selected for this task's iteration */
+  effectiveAgentPlugin?: string;
+
+  /** Effective model selected for this task's iteration */
+  effectiveModel?: string;
+
   /** Whether the task was completed */
   taskCompleted: boolean;
 
@@ -345,6 +351,10 @@ export interface IterationStartedEvent extends EngineEventBase {
   iteration: number;
   /** Task being worked on */
   task: TrackerTask;
+  /** Effective agent plugin selected for this task */
+  effectiveAgentPlugin: string;
+  /** Effective model selected for this task (if any) */
+  effectiveModel?: string;
 }
 
 /**

@@ -1052,13 +1052,6 @@ export class ExecutionEngine {
     const iteration = this.state.currentIteration;
 
     this.emit({
-      type: 'iteration:started',
-      timestamp: startedAt.toISOString(),
-      iteration,
-      task,
-    });
-
-    this.emit({
       type: 'task:selected',
       timestamp: new Date().toISOString(),
       task,
@@ -1079,6 +1072,16 @@ export class ExecutionEngine {
 
     // Apply per-task routing before building prompt/executing this iteration.
     await this.applyTaskAgentRouting(routing.agentPlugin, task.id);
+    const effectiveAgentPlugin = this.state.activeAgent?.plugin ?? this.config.agent.plugin;
+
+    this.emit({
+      type: 'iteration:started',
+      timestamp: startedAt.toISOString(),
+      iteration,
+      task,
+      effectiveAgentPlugin,
+      effectiveModel,
+    });
 
     // Validate effective model for the active agent (global or per-task override).
     if (effectiveModel) {
@@ -1374,6 +1377,8 @@ export class ExecutionEngine {
           iteration,
           status: 'failed',
           task,
+          effectiveAgentPlugin,
+          effectiveModel,
           taskCompleted: false,
           promiseComplete: false,
           durationMs: endedAt.getTime() - startedAt.getTime(),
@@ -1440,6 +1445,8 @@ export class ExecutionEngine {
         status,
         task,
         agentResult: toMemorySafeAgentResult(agentResult),
+        effectiveAgentPlugin,
+        effectiveModel,
         taskCompleted,
         promiseComplete,
         durationMs,
@@ -1488,6 +1495,8 @@ export class ExecutionEngine {
         iteration,
         status: 'failed',
         task,
+        effectiveAgentPlugin,
+        effectiveModel,
         taskCompleted: false,
         promiseComplete: false,
         durationMs: endedAt.getTime() - startedAt.getTime(),

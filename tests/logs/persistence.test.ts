@@ -127,6 +127,23 @@ describe('buildMetadata', () => {
     expect(metadata.model).toBe('claude-sonnet-4-20250514');
   });
 
+  test('prefers effective routing agent and model from iteration result over global config', () => {
+    const result = createTestIterationResult({
+      effectiveAgentPlugin: 'codex',
+      effectiveModel: 'gpt-5.3-codex',
+    });
+
+    const metadata = buildMetadata(result, {
+      config: {
+        agent: { name: 'claude', plugin: 'claude', options: {} },
+        model: 'claude-sonnet-4-20250514',
+      },
+    });
+
+    expect(metadata.agentPlugin).toBe('codex');
+    expect(metadata.model).toBe('gpt-5.3-codex');
+  });
+
   test('handles old config-only signature for backward compatibility', () => {
     const result = createTestIterationResult();
 
