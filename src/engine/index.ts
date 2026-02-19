@@ -89,6 +89,11 @@ const MAX_ITERATION_HISTORY_STREAM_CHARS = 100_000;
  */
 const OUTPUT_TRUNCATED_PREFIX = '[...output truncated in memory...]\n';
 
+interface TaskRoutingConfig {
+  agentPlugin?: string;
+  model?: string;
+}
+
 /**
  * Append text to an in-memory buffer while enforcing a maximum size.
  * Keeps the tail because completion markers and recent context are usually at the end.
@@ -831,8 +836,92 @@ export class ExecutionEngine {
       stderr,
       stdout,
       exitCode,
-      agentId: this.config.agent.plugin,
+      agentId: this.state.activeAgent?.plugin ?? this.config.agent.plugin,
     });
+  }
+
+  /**
+   * Resolve per-task routing from task metadata.
+   * Resolution order for agent routing is:
+   * 1) metadata.agent
+   * 2) metadata.provider
+   */
+  private resolveTaskRouting(task: TrackerTask): TaskRoutingConfig {
+    const metadata = task.metadata;
+    if (!metadata || typeof metadata !== 'object') {
+      return {};
+    }
+
+    const values = metadata as Record<string, unknown>;
+    const getString = (key: string): string | undefined => {
+      const value = values[key];
+      if (typeof value !== 'string') {
+        return undefined;
+      }
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    };
+
+    return {
+      agentPlugin: getString('agent') ?? getString('provider'),
+      model: getString('model'),
+    };
+  }
+
+  /**
+   * Apply per-task agent routing before execution begins.
+   * If no routing metadata exists, keeps the configured default agent behavior.
+   */
+  private async applyTaskAgentRouting(agentPlugin?: string): Promise<void> {
+    const targetPrimaryAgent = agentPlugin ?? this.config.agent.plugin;
+    const currentPrimaryAgent = this.state.rateLimitState?.primaryAgent ?? this.config.agent.plugin;
+
+    // Keep fallback for retries of the same primary agent.
+    if (
+      this.state.activeAgent?.reason === 'fallback' &&
+      currentPrimaryAgent === targetPrimaryAgent
+    ) {
+      return;
+    }
+
+    const currentAgentPlugin = this.state.activeAgent?.plugin ?? this.config.agent.plugin;
+    if (
+      this.state.activeAgent?.reason !== 'fallback' &&
+      currentAgentPlugin === targetPrimaryAgent &&
+      currentPrimaryAgent === targetPrimaryAgent
+    ) {
+      return;
+    }
+
+    const agentRegistry = getAgentRegistry();
+    const routingConfig =
+      targetPrimaryAgent === this.config.agent.plugin
+        ? this.config.agent
+        : {
+            ...this.config.agent,
+            name: targetPrimaryAgent,
+            plugin: targetPrimaryAgent,
+            options: { ...this.config.agent.options },
+          };
+
+    const instance = await agentRegistry.getInstance(routingConfig);
+    const detectResult = await instance.detect();
+    if (!detectResult.available) {
+      throw new Error(
+        `Agent '${targetPrimaryAgent}' not available: ${detectResult.error}`
+      );
+    }
+
+    this.agent = instance;
+    this.primaryAgentInstance = instance;
+    this.state.activeAgent = {
+      plugin: targetPrimaryAgent,
+      reason: 'primary',
+      since: new Date().toISOString(),
+    };
+    this.state.rateLimitState = {
+      primaryAgent: targetPrimaryAgent,
+    };
   }
 
   /**
@@ -908,6 +997,9 @@ export class ExecutionEngine {
    * Run a single iteration
    */
   private async runIteration(task: TrackerTask): Promise<IterationResult> {
+    const routing = this.resolveTaskRouting(task);
+    const effectiveModel = routing.model ?? this.config.model;
+
     this.state.currentIteration++;
     this.state.currentTask = task;
     this.state.currentOutput = '';
@@ -949,13 +1041,24 @@ export class ExecutionEngine {
       iteration,
     });
 
+    // Apply per-task routing before building prompt/executing this iteration.
+    await this.applyTaskAgentRouting(routing.agentPlugin);
+
+    // Validate effective model for the active agent (global or per-task override).
+    if (effectiveModel) {
+      const modelError = this.agent!.validateModel(effectiveModel);
+      if (modelError) {
+        throw new Error(modelError);
+      }
+    }
+
     // Build prompt (includes recent progress context + tracker-owned template)
     const prompt = await buildPrompt(task, this.config, this.tracker ?? undefined);
 
     // Build agent flags
     const flags: string[] = [];
-    if (this.config.model) {
-      flags.push('--model', this.config.model);
+    if (effectiveModel) {
+      flags.push('--model', effectiveModel);
     }
 
     // Check if agent declares subagent tracing support (used for agent-specific flags)

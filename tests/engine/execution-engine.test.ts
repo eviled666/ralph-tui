@@ -27,6 +27,7 @@ import {
 
 // Mock the registry modules
 const mockAgentInstance = createMockAgentPlugin();
+const mockGetAgentInstance = mock(() => Promise.resolve(mockAgentInstance));
 const mockTrackerInstance: Partial<TrackerPlugin> = {
   sync: mock(() => Promise.resolve({ success: true, message: 'Synced', added: 0, updated: 0, removed: 0, syncedAt: new Date().toISOString() })),
   getTasks: mock(() => Promise.resolve([] as TrackerTask[])),
@@ -46,7 +47,7 @@ const mockUpdateSessionMaxIterations = mock(() => Promise.resolve());
 // Override module imports
 mock.module('../../src/plugins/agents/registry.js', () => ({
   getAgentRegistry: () => ({
-    getInstance: () => Promise.resolve(mockAgentInstance),
+    getInstance: mockGetAgentInstance,
   }),
 }));
 
@@ -108,6 +109,7 @@ describe('ExecutionEngine', () => {
     mock.restore();
     events = [];
     config = createTestConfig();
+    mockGetAgentInstance.mockImplementation(() => Promise.resolve(mockAgentInstance));
   });
 
   afterEach(async () => {
@@ -933,6 +935,124 @@ describe('ExecutionEngine', () => {
         (e) => e.type === 'engine:stopped' && 'reason' in e && e.reason === 'no_tasks'
       );
       expect(stopEvent).toBeDefined();
+    });
+  });
+
+  describe('task routing metadata', () => {
+    test('routes to metadata.agent before metadata.provider and uses metadata.model', async () => {
+      const initialGetInstanceCalls = mockGetAgentInstance.mock.calls.length;
+      const primaryAgent = createMockAgentPlugin({
+        meta: { id: 'claude', name: 'Claude' },
+      });
+      const routedAgent = createMockAgentPlugin({
+        meta: { id: 'codex', name: 'Codex' },
+      });
+
+      const primaryExecute = mock(() => ({
+        promise: Promise.resolve(createSuccessfulExecution('done')),
+        interrupt: mock(() => {}),
+      }));
+      const routedExecute = mock(() => ({
+        promise: Promise.resolve(createSuccessfulExecution('done')),
+        interrupt: mock(() => {}),
+      }));
+      primaryAgent.execute = primaryExecute as AgentPlugin['execute'];
+      routedAgent.execute = routedExecute as AgentPlugin['execute'];
+
+      const originalGetInstance = mockGetAgentInstance.getMockImplementation();
+      mockGetAgentInstance.mockImplementation((agentConfig) => {
+        if (agentConfig.plugin === 'codex') {
+          return Promise.resolve(routedAgent);
+        }
+        return Promise.resolve(primaryAgent);
+      });
+
+      config = createTestConfig({
+        maxIterations: 1,
+        model: 'global-model',
+      });
+      engine = new ExecutionEngine(config);
+
+      const routedTask = createTrackerTask({
+        id: 'task-routed',
+        metadata: {
+          agent: 'codex',
+          provider: 'gemini',
+          model: 'gpt-5.3-codex',
+        },
+      });
+
+      (mockTrackerInstance.getTasks as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve([routedTask])
+      );
+      (mockTrackerInstance.getNextTask as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve(routedTask)
+      );
+      (mockTrackerInstance.isComplete as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve(false)
+      );
+
+      try {
+        await engine.initialize();
+        await engine.start();
+      } finally {
+        mockGetAgentInstance.mockImplementation(originalGetInstance);
+      }
+
+      expect(primaryExecute).toHaveBeenCalledTimes(0);
+      expect(routedExecute).toHaveBeenCalledTimes(1);
+      expect(mockGetAgentInstance.mock.calls.length - initialGetInstanceCalls).toBe(2);
+      expect(mockGetAgentInstance).toHaveBeenCalledWith(
+        expect.objectContaining({ plugin: 'codex' })
+      );
+
+      const executeOptions = routedExecute.mock.calls[0]?.[2];
+      expect(executeOptions?.flags).toEqual(['--model', 'gpt-5.3-codex']);
+    });
+
+    test('uses existing global agent and model when task metadata has no routing keys', async () => {
+      const initialGetInstanceCalls = mockGetAgentInstance.mock.calls.length;
+      const primaryExecute = mock((_prompt: string, _files: unknown[], options?: { flags?: string[] }) => ({
+        promise: Promise.resolve(createSuccessfulExecution('done')),
+        interrupt: mock(() => {}),
+      }));
+      const originalExecute = mockAgentInstance.execute;
+      mockAgentInstance.execute = primaryExecute as AgentPlugin['execute'];
+
+      config = createTestConfig({
+        maxIterations: 1,
+        model: 'global-model',
+      });
+      engine = new ExecutionEngine(config);
+
+      const defaultTask = createTrackerTask({
+        id: 'task-default',
+        metadata: {
+          acceptanceCriteria: ['criterion'],
+        },
+      });
+
+      (mockTrackerInstance.getTasks as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve([defaultTask])
+      );
+      (mockTrackerInstance.getNextTask as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve(defaultTask)
+      );
+      (mockTrackerInstance.isComplete as ReturnType<typeof mock>).mockImplementation(() =>
+        Promise.resolve(false)
+      );
+
+      try {
+        await engine.initialize();
+        await engine.start();
+      } finally {
+        mockAgentInstance.execute = originalExecute;
+      }
+
+      expect(mockGetAgentInstance.mock.calls.length - initialGetInstanceCalls).toBe(1);
+      expect(primaryExecute).toHaveBeenCalledTimes(1);
+      const executeOptions = primaryExecute.mock.calls[0]?.[2];
+      expect(executeOptions?.flags).toEqual(['--model', 'global-model']);
     });
   });
 });
