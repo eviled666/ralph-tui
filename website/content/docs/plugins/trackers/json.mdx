@@ -149,6 +149,11 @@ For per-task routing, Ralph reads routing keys from each user story's `metadata`
 - `metadata.provider` - Alias routing key (used when `metadata.agent` is not set)
 - `metadata.model` - Optional per-task model override
 
+#### v1 Scope Boundary
+
+- v1 task-level routing support is scoped to the **JSON tracker** (`prd.json`) only.
+- This scope statement defines what is stable for v1. Other tracker integrations are out of scope for this rollout and may evolve separately.
+
 Resolution order for routed agent selection:
 
 1. `metadata.agent`
@@ -162,6 +167,46 @@ Supported v1 routed agents:
 - `gemini`
 
 If neither `metadata.agent` nor `metadata.provider` is present, Ralph uses your configured default agent.
+
+If a task specifies an unknown agent value, Ralph emits an `engine:warning` and deterministically falls back to your configured default agent for that task (the run continues).
+
+`grok` is out of scope for v1 task routing. In v1, `grok` is not a supported `metadata.agent` value.
+
+#### Rollout Policy (v1 -> v2)
+
+| Version | `metadata.provider` Alias Status | Behavior |
+|-------|------|----------|
+| v1 | Supported | Used as fallback alias when `metadata.agent` is missing |
+| v1.1 | Deprecated | Still works, but emits deprecation warnings |
+| v2 | Removed | Ignored for routing; use `metadata.agent` only |
+
+#### Migration Guidance (Global Agent -> Task Routing)
+
+If you currently use only global agent config (for example `agent = "claude"` in `.ralph-tui/config.toml`), migrate incrementally:
+
+1. Keep your existing global `agent` as the safe default.
+2. Add `metadata.agent` only to tasks that need a non-default agent.
+3. Replace `metadata.provider` with `metadata.agent` ahead of v2.
+
+Example:
+
+```toml
+# .ralph-tui/config.toml
+agent = "claude"
+```
+
+```json
+{
+  "id": "US-042",
+  "title": "Generate benchmark script",
+  "passes": false,
+  "metadata": {
+    "agent": "codex"
+  }
+}
+```
+
+Tasks without `metadata.agent` continue to run on the global default agent.
 
 ### Routed Task Example
 
