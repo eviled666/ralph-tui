@@ -26,9 +26,16 @@ describe('JsonTrackerPlugin', () => {
         title: 'First Story',
         description: 'As a user, I want to test',
         acceptanceCriteria: ['Criterion 1', 'Criterion 2'],
+        notes: 'Keep this note',
         priority: 1,
         passes: false,
         labels: ['test'],
+        metadata: {
+          agent: 'codex',
+          provider: 'openai',
+          model: 'gpt-5.3-codex',
+          routingKey: 'json-metadata-routing',
+        },
       },
       {
         id: 'US-002',
@@ -152,6 +159,43 @@ describe('JsonTrackerPlugin', () => {
       const task = tasks[0];
 
       expect(task?.metadata?.acceptanceCriteria).toEqual(['Criterion 1', 'Criterion 2']);
+    });
+
+    test('preserves existing notes metadata fields', async () => {
+      await plugin.initialize({ path: prdPath });
+      const tasks = await plugin.getTasks();
+      const task = tasks[0];
+
+      expect(task?.metadata?.notes).toBe('Keep this note');
+      expect(task?.metadata?.completionNotes).toBe('Keep this note');
+    });
+
+    test('passes through arbitrary story metadata', async () => {
+      await plugin.initialize({ path: prdPath });
+      const tasks = await plugin.getTasks();
+      const task = tasks[0];
+
+      expect(task?.metadata?.agent).toBe('codex');
+      expect(task?.metadata?.provider).toBe('openai');
+      expect(task?.metadata?.model).toBe('gpt-5.3-codex');
+      expect(task?.metadata?.routingKey).toBe('json-metadata-routing');
+    });
+
+    test('handles missing story metadata without runtime errors', async () => {
+      const noMetadataPrd = {
+        name: 'No Metadata Project',
+        userStories: [{ id: 'US-003', title: 'No metadata', passes: false }],
+      };
+
+      await writeFile(prdPath, JSON.stringify(noMetadataPrd, null, 2));
+      await plugin.initialize({ path: prdPath });
+
+      const tasks = await plugin.getTasks();
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]?.id).toBe('US-003');
+      expect(tasks[0]?.metadata).toBeDefined();
+      expect(tasks[0]?.metadata?.acceptanceCriteria).toBeUndefined();
+      expect(tasks[0]?.metadata?.notes).toBeUndefined();
     });
 
     test('filters by status', async () => {

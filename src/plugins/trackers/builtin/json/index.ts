@@ -53,6 +53,9 @@ interface PrdUserStory {
 
   /** Optional notes for when the story was completed (alias for notes) */
   completionNotes?: string;
+
+  /** Optional arbitrary metadata attached to this story */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -271,8 +274,27 @@ function statusToPasses(status: TrackerTaskStatus): boolean {
  * Convert a PrdUserStory to TrackerTask.
  */
 function storyToTask(story: PrdUserStory, parentName?: string): TrackerTask {
+  const metadata: Record<string, unknown> = {
+    ...(story.metadata ?? {}),
+  };
+
   // Use notes or completionNotes (notes takes precedence as it's the Ralph standard)
-  const notes = story.notes || story.completionNotes;
+  const metadataNotes =
+    typeof metadata.notes === 'string'
+      ? metadata.notes
+      : typeof metadata.completionNotes === 'string'
+        ? metadata.completionNotes
+        : undefined;
+  const notes = story.notes || story.completionNotes || metadataNotes;
+
+  if (story.acceptanceCriteria !== undefined) {
+    metadata.acceptanceCriteria = story.acceptanceCriteria;
+  }
+
+  if (notes !== undefined) {
+    metadata.notes = notes;
+    metadata.completionNotes = notes;
+  }
 
   return {
     id: story.id,
@@ -284,11 +306,7 @@ function storyToTask(story: PrdUserStory, parentName?: string): TrackerTask {
     type: 'story',
     parentId: parentName,
     dependsOn: story.dependsOn,
-    metadata: {
-      acceptanceCriteria: story.acceptanceCriteria,
-      notes: notes,
-      completionNotes: notes, // Keep for backward compat
-    },
+    metadata,
   };
 }
 
