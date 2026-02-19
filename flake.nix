@@ -23,7 +23,16 @@
           pkgs.bun
         ];
         text = ''
-          exec bun ${self}/src/cli.tsx "$@"
+          if [ ! -f ./src/cli.tsx ]; then
+            echo "error: run from the ralph-tui repository root (missing ./src/cli.tsx)" >&2
+            exit 1
+          fi
+
+          if [ ! -d ./node_modules ]; then
+            bun install --frozen-lockfile >/dev/null
+          fi
+
+          exec bun ./src/cli.tsx "$@"
         '';
       };
 
@@ -33,7 +42,16 @@
           pkgs.bun
         ];
         text = ''
-          exec bun ${self}/src/cli.tsx "$@"
+          if [ ! -f ./src/cli.tsx ]; then
+            echo "error: run from the ralph-tui repository root (missing ./src/cli.tsx)" >&2
+            exit 1
+          fi
+
+          if [ ! -d ./node_modules ]; then
+            bun install --frozen-lockfile >/dev/null
+          fi
+
+          exec bun ./src/cli.tsx "$@"
         '';
       };
     in {
